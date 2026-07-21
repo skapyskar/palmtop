@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Sourced by other scripts to load the active device + host profile into shell
+# variables. Keeps device-specific values out of the scripts themselves.
+#
+#   source scripts/device.sh
+#   adb -s "$DEVICE_SERIAL" shell ...
+#
+# Device selection: $PALMTOP_DEVICE -> config/active -> error.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_DIR="${PALMTOP_CONFIG_DIR:-$REPO_ROOT/config}"
+
+# Minimal TOML reader: `_toml_get <file> <section> <key>`.
+# Handles the flat `key = "value"` shape these profiles use -- not general TOML.
+_toml_get() {
+  awk -v section="$2" -v key="$3" '
+    /^[[:space:]]*\[/ {
+      gsub(/[][[:space:]]/, "", $0); current = $0; next
+    }
+    current == section {
+      line = $0
+      sub(/#.*/, "", line)                       # strip comments
+      split(line, kv, "=")
+      k = kv[1]; gsub(/[[:space:]]/, "", k)
+      if (k == key) {
+        v = substr(line, index(line, "=") + 1)
+        gsub(/^[[:space:]]*"?|"?[[:space:]]*$/, "", v)
+        print v; exit
+      }
+    }
+  ' "$1"
+}
+
+# --- host ---
+HOST_CONFIG="$CONFIG_DIR/host.toml"
+if [ ! -f "$HOST_CONFIG" ]; then
+  echo "error: missing $HOST_CONFIG" >&2
+  echo "  cp config/host.example.toml config/host.toml   (or ./scripts/probe-host.sh)" >&2
+  return 1 2>/dev/null || exit 1
+fi
+HOST_IP="$(_toml_get "$HOST_CONFIG" host ip)"
+HOST_PORT="$(_toml_get "$HOST_CONFIG" host port)"
+VAAPI_RENDER_NODE="$(_toml_get "$HOST_CONFIG" gpu vaapi_render_node)"
+# Blank ip means auto-detect.
+if [ -z "$HOST_IP" ]; then
+  HOST_IP="$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+' | head -1)"
+fi
+
+# --- device ---
+DEVICE_NAME="${PALMTOP_DEVICE:-}"
+if [ -z "$DEVICE_NAME" ] && [ -f "$CONFIG_DIR/active" ]; then
+  DEVICE_NAME="$(tr -d '[:space:]' < "$CONFIG_DIR/active")"
+fi
+if [ -z "$DEVICE_NAME" ]; then
+  echo "error: no device selected." >&2
+  echo "Available:" >&2
+  ls "$CONFIG_DIR/devices"/*.toml 2>/dev/null \
+    | xargs -rn1 basename | sed 's/\.toml$//' | grep -v '^example$' | sed 's/^/  /' >&2
+  echo "  echo <name> > config/active     # or PALMTOP_DEVICE=<name>" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+DEVICE_CONFIG="$CONFIG_DIR/devices/$DEVICE_NAME.toml"
+if [ ! -f "$DEVICE_CONFIG" ]; then
+  echo "error: no device profile at $DEVICE_CONFIG" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+DEVICE_SERIAL="$(_toml_get "$DEVICE_CONFIG" adb serial)"
+DEVICE_IP="$(_toml_get "$DEVICE_CONFIG" adb ip)"
+DEVICE_MODEL="$(_toml_get "$DEVICE_CONFIG" device model)"
+DEVICE_REFRESH_HZ="$(_toml_get "$DEVICE_CONFIG" display refresh_hz)"
+DEVICE_MAX_FPS="$(_toml_get "$DEVICE_CONFIG" limits max_fps)"
+
+export HOST_IP HOST_PORT VAAPI_RENDER_NODE
+export DEVICE_NAME DEVICE_SERIAL DEVICE_IP DEVICE_MODEL DEVICE_REFRESH_HZ DEVICE_MAX_FPS

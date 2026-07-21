@@ -1,0 +1,23 @@
+# Template for the host (the Linux machine running the capture/encode side).
+# Copy to host.toml and edit. Populate with: ./scripts/probe-host.sh
+
+[host]
+# This machine's IP on the network shared with the phone. The phone dials this.
+# Leave empty to auto-detect the primary interface address at runtime.
+ip   = ""
+# TCP port the stream server listens on.
+port = 9999
+
+[gpu]
+# DRM render node used for VA-API hardware encode.
+# Hybrid-GPU laptops expose several -- pick the one you actually want to encode on.
+# Identify them with:
+#   for n in /dev/dri/renderD*; do
+#     echo "$n -> $(cat /sys/class/drm/$(basename $n)/device/uevent | grep DRIVER)"
+#   done
+vaapi_render_node = "/dev/dri/renderD128"
+
+[encode]
+codec = "h264_vaapi"
+qp    = 24
+fps   = 30

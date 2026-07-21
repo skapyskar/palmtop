@@ -1,0 +1,8 @@
+# Everything local is ignored; only templates and docs are committed.
+*
+!.gitignore
+!README.md
+!host.example.toml
+!devices/
+devices/*
+!devices/example.toml

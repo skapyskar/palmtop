@@ -1,0 +1,11 @@
+/target
+
+# Real desktop content -- never commit
+*.ppm
+
+# Generated test streams and Android build artifacts
+*.h264
+android-spike/build/
+android-spike/palmtop-spike.apk
+android-spike/palmtop-spike.apk.idsig
+android-spike/debug.keystore

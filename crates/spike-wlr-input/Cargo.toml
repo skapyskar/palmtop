@@ -1,0 +1,12 @@
+[package]
+name = "spike-wlr-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 0 spike: prove wlr virtual-pointer/keyboard input injection works on wlroots (Hyprland)."
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.8"

@@ -1,0 +1,10 @@
+[package]
+name = "spike-h264-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 0 spike: stream Annex-B H.264 access units over TCP, paced, to the Android decode spike."
+
+[dependencies]
+anyhow = "1"
+palmtop-config = { path = "../palmtop-config" }

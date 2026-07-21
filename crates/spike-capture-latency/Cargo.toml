@@ -1,0 +1,14 @@
+[package]
+name = "spike-capture-latency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 0 gap-closer: measure real input-injection -> compositor -> portal capture latency by injecting cursor motion and timing when it appears in captured frames."
+
+[dependencies]
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+pipewire = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+anyhow = "1"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

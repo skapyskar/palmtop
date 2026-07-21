@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/spike-wlr-input",
+    "crates/spike-portal-capture",
+    "crates/spike-capture-encode",
+    "crates/spike-h264-server",
+    "crates/spike-capture-latency",
+    "crates/palmtop-config",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"

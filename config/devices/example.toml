@@ -1,0 +1,38 @@
+# Template for a device profile. Copy to <name>.toml and edit.
+# Populate automatically with: ./scripts/probe-device.sh <adb-serial>
+
+[device]
+# Human-readable label; also used in log output.
+name  = "example-phone"
+model = "Some Phone Model"
+# Android API level (30+ required for MediaCodec KEY_LOW_LATENCY).
+sdk   = 31
+
+[adb]
+# What `adb -s <serial>` should target.
+#   USB:      the raw serial, e.g. "ZY227ABCDE"
+#   wireless: "<ip>:<port>", e.g. "192.168.1.42:5555"
+serial = "192.168.1.42:5555"
+# Device IP on the current network (used for reachability checks).
+ip     = "192.168.1.42"
+
+[display]
+width      = 1080
+height     = 2400
+density    = 420
+# Panel refresh rate -- sets the display quantisation in the latency budget.
+refresh_hz = 60
+
+[decoder]
+# Vendor low-latency decoder names, if the device advertises them.
+# Leave empty to let the client auto-select at runtime.
+h264 = ""
+h265 = ""
+
+[limits]
+# Resolution/framerate the device can decode without queuing latency building up.
+# Measured, not assumed -- see the decode spike in the README. Exceeding a device's
+# decode capacity raises latency even when throughput still looks fine.
+max_width  = 1920
+max_height = 1080
+max_fps    = 30
