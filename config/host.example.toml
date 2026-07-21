@@ -21,3 +21,8 @@ vaapi_render_node = "/dev/dri/renderD128"
 codec = "h264_vaapi"
 qp    = 24
 fps   = 30
+# VA-API frame-pipelining depth. Lower = less input-to-screen lag, at the cost
+# of encoder throughput headroom. 1 is the right default for an interactive
+# control loop (as opposed to e.g. video export, where higher values trade
+# latency for better compression efficiency/throughput).
+async_depth = 1

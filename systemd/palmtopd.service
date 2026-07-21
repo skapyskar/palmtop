@@ -1,0 +1,27 @@
+# Palmtop host daemon, per the plan's §3.6: runs as a --user service, not
+# root. Install with scripts/install-service.sh (do not copy by hand -- it
+# substitutes the real binary path for the placeholder below).
+#
+# Needs WAYLAND_DISPLAY / DBUS_SESSION_BUS_ADDRESS / XDG_RUNTIME_DIR already
+# in the systemd --user environment (portal + PipeWire capture depend on
+# them) -- scripts/install-service.sh checks for these before installing.
+#
+# Deliberately does NOT gate on graphical-session.target: not every
+# compositor config activates it (confirmed on this machine's Hyprland setup
+# -- the target existed but was inactive/dead even with a fully working
+# graphical session and all the env vars present). Depending on it with
+# Requisite= hard-fails the service start in that case. The env-var check
+# above is the real precondition; the target is not.
+[Unit]
+Description=Palmtop host daemon (capture -> encode -> stream, wlr input injection)
+
+[Service]
+Type=simple
+ExecStart=__PALMTOPD_BIN__
+WorkingDirectory=__PALMTOP_REPO__
+Restart=on-failure
+RestartSec=2
+# No root, no elevated capabilities -- matches plan §3.6/§6 (least privilege).
+
+[Install]
+WantedBy=default.target

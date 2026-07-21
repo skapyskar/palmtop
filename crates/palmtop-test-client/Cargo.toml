@@ -1,0 +1,11 @@
+[package]
+name = "palmtop-test-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal desktop test client for palmtopd -- validates the host session (handshake, video stream, input round-trip) before the Android client exists/is reachable."
+
+[dependencies]
+anyhow = "1"
+palmtop-config = { path = "../palmtop-config" }
+palmtop-proto = { path = "../palmtop-proto" }

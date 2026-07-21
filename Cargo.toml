@@ -7,6 +7,9 @@ members = [
     "crates/spike-h264-server",
     "crates/spike-capture-latency",
     "crates/palmtop-config",
+    "crates/palmtop-proto",
+    "crates/palmtopd",
+    "crates/palmtop-test-client",
 ]
 
 [workspace.package]

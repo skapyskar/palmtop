@@ -21,6 +21,18 @@ pub struct HostConfig {
     pub gpu: GpuSection,
     #[serde(default)]
     pub encode: EncodeSection,
+    #[serde(default)]
+    pub pairing: PairingSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PairingSection {
+    /// Shared secret a client must present in `Hello` to be accepted --
+    /// see palmtopd/src/pairing.rs. Generated on first run and appended to
+    /// `config/host.toml` if missing (never generated fresh on every start,
+    /// or every previously-paired client would be locked out each restart).
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,11 +57,25 @@ pub struct EncodeSection {
     pub qp: u32,
     #[serde(default = "default_fps")]
     pub fps: u32,
+    /// VA-API frame-pipelining depth. The Phase 0 encode spike measured
+    /// *throughput* (120fps batch) and never per-frame latency; VA-API
+    /// buffers several frames internally by default to hit that throughput,
+    /// which is invisible in a batch benchmark but shows up directly as
+    /// input-to-screen lag. Default 1 trades throughput headroom (we have
+    /// 4x to spare against a 30fps target) for latency, which is the
+    /// correct trade for an interactive control loop.
+    #[serde(default = "default_async_depth")]
+    pub async_depth: u32,
 }
 
 impl Default for EncodeSection {
     fn default() -> Self {
-        Self { codec: default_codec(), qp: default_qp(), fps: default_fps() }
+        Self {
+            codec: default_codec(),
+            qp: default_qp(),
+            fps: default_fps(),
+            async_depth: default_async_depth(),
+        }
     }
 }
 
@@ -57,6 +83,7 @@ fn default_port() -> u16 { 9999 }
 fn default_codec() -> String { "h264_vaapi".into() }
 fn default_qp() -> u32 { 24 }
 fn default_fps() -> u32 { 30 }
+fn default_async_depth() -> u32 { 1 }
 
 impl HostConfig {
     pub fn load() -> Result<Self> {
@@ -70,7 +97,26 @@ impl HostConfig {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("read {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+        let mut cfg: HostConfig =
+            toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+
+        if cfg.pairing.token.is_empty() {
+            let token = generate_token()?;
+            // Appended as raw text, not re-serialized, so existing comments
+            // and formatting in the file are left untouched.
+            let mut updated = text;
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(&format!(
+                "\n[pairing]\n# Generated on first run -- required in Hello for a client to be accepted.\ntoken = \"{token}\"\n"
+            ));
+            std::fs::write(&path, updated)
+                .with_context(|| format!("persist generated pairing token to {}", path.display()))?;
+            cfg.pairing.token = token;
+        }
+
+        Ok(cfg)
     }
 
     /// Configured IP, or the primary interface address if left blank.
@@ -254,4 +300,17 @@ fn detect_primary_ip() -> Result<String> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.connect("8.8.8.8:53")?;
     Ok(sock.local_addr()?.ip().to_string())
+}
+
+/// 16 random bytes, hex-encoded, read straight from the kernel CSPRNG.
+/// Avoids pulling in a `rand` dependency for something the OS already
+/// provides directly and portably (Linux-only host, per the plan's scope).
+fn generate_token() -> Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .context("open /dev/urandom")?
+        .read_exact(&mut bytes)
+        .context("read /dev/urandom")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }

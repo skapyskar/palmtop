@@ -41,4 +41,6 @@ vaapi_render_node = "$PICKED"
 codec = "h264_vaapi"
 qp    = 24
 fps   = 30
+# Lower = less input-to-screen lag, at the cost of encoder throughput headroom.
+async_depth = 1
 EOF

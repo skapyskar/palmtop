@@ -299,4 +299,107 @@ adb connect 192.168.217.213:5555      # phone's hotspot IP; USB can now be unplu
 Note this is a *dev-tooling* limitation only — the hotspot LAN itself carries app traffic
 fine in both directions, so Palmtop's own connectivity is unaffected.
 
+---
+
+## Status: Phase 1 (MVP core) — **complete**
+
+Real product code now, not spikes: continuous live capture → encode → network stream →
+decode, with tier-2 input round-tripping from a real touchscreen, mDNS discovery, QR/token
+pairing, and a systemd `--user` service. Verified live end-to-end from a physical phone.
+
+| Component | What it is |
+|---|---|
+| `crates/palmtop-proto` | Versioned TLV wire protocol shared by host + client (6 tests) |
+| `crates/palmtopd` | Host daemon: `capture` + `encode` + `input` + `session` modules, `pairing` (mDNS/QR) |
+| `android-spike/` (app id `dev.palmtop.spike`) | Real Android client — direct-touch input, continuous MediaCodec decode, persisted host/token, in-app Reconnect |
+| `systemd/palmtopd.service` + `scripts/install-service.sh` | `--user` service, no root |
+
+### Architecture as built
+```
+palmtopd (systemd --user service)
+  capture.rs   portal + PipeWire, continuous, single-slot FrameSlot (drop stale, never queue)
+  encode.rs    persistent ffmpeg (VA-API), incremental Annex-B splitter, LatestEncoded mailbox
+  input.rs     wlr virtual-pointer/keyboard, long-lived, driven by live network events
+  session.rs   single-client TCP session: handshake -> pairing check -> wires the above together
+  pairing.rs   mDNS advertise (_palmtop._tcp) + QR-rendered connect info (host:port:token)
+        |
+        | palmtop-proto (TLV over TCP)
+        v
+Android client (dev.palmtop.spike)
+  Protocol.java     Java mirror of the wire format (DataInput/OutputStream are already
+                     big-endian, so no manual byte-order handling either side)
+  MainActivity.java direct-touch input, MediaCodec low-latency decode, generation-counter
+                     reconnect lifecycle, host/port/token persisted in SharedPreferences
+```
+
+### Real bugs found and fixed while wiring this together
+Each of these produced a concrete, observed symptom — recorded because the fix generalizes:
+
+1. **MediaCodec callback blocking → 133ms phantom latency** (found in Phase 0, re-confirmed
+   applying the same pattern here): never block inside a MediaCodec callback; all callbacks
+   share one handler thread.
+2. **VA-API `async_depth` defaults trade latency for throughput.** Phase 0's encode spike
+   measured *throughput* (120fps batch) and never per-frame latency. Live streaming exposed
+   the gap: default pipelining depth added real input-to-screen lag. Fixed with
+   `[encode] async_depth = 1` in `config/host.toml` — cheap to spend given the ~65x bandwidth
+   and ~4x throughput headroom already measured.
+3. **Dropped tokio runtime mid-session → possible portal/DBus teardown race.** `session.rs`
+   used to create a `tokio::runtime::Runtime` per connection and drop it immediately after
+   extracting the PipeWire fd. The portal's DBus connection lives inside that runtime;
+   dropping it while the still-in-use PipeWire stream depends on the session staying open
+   risked exactly the kind of "capture negotiates fine, then delivers nothing" failure
+   observed during testing. Fixed: one runtime for the daemon's whole lifetime (`main.rs`).
+4. **The real 24-second lag bug: no backpressure between encode and network.** `FrameSlot`
+   (capture → encode) correctly drops stale frames, but the original encode → network path
+   used an *unbounded* `mpsc` channel. If the client ever fell even briefly behind the
+   encoder, frames piled up without limit and were sent later, in order, arbitrarily stale —
+   at one point measured at ~24s of accumulated lag. Fixed by applying the exact same
+   single-slot "keep only the latest" design (`encode::LatestEncoded`) to this stage too.
+   **Lesson**: "never queue" has to be an invariant enforced at *every* pipeline stage, not
+   just the one that happened to get measured first.
+5. **A locked/dozing phone silently no-ops.** `SurfaceView.surfaceCreated` never fires while
+   the screen is off, so the app connects but never decodes, with no visible error. Purely an
+   operational gotcha during testing, not a code bug — worth remembering when it looks "stuck".
+6. **Relaunching via the launcher icon lost host/port.** Sends a bare `ACTION_MAIN` Intent
+   with no extras, so every relaunch after pressing back needed a fresh `adb shell am start`.
+   Fixed: host/port/token persist to `SharedPreferences` on first successful launch; a
+   generation-counter reconnect lifecycle (`MainActivity.startConnection()`/`teardown()`) also
+   adds an in-app **⟳ Reconnect** button so recovering from any dropped session never needs
+   adb again.
+
+### UX pivot: trackpad → direct touch
+The first input mode was trackpad-relative (drag a cursor, tap to click) — mirroring the
+plan's §4.3 default. Live testing surfaced a real usability problem the design hadn't
+anticipated: video round-trip latency (capture→encode→network→decode→display) makes a
+relative cursor visibly *lag behind* the finger, which feels broken even when the underlying
+input is fast. Switched to **direct absolute touch** (tap where you want to click, exactly
+like a touchscreen — see `MainActivity.onTouch`'s doc comment): position is set by *where*
+you touched, not by watching a cursor arrive, so it's correct-feeling regardless of video
+latency. Host-side support (`PointerMotionAbsolute`) already existed and was already proven
+by `spike-capture-latency`; this was a client-only change. Trackpad mode may return later
+as a selectable option (plan §4.3 still wants both), but direct-touch is the default now.
+
+### Explicitly deferred (not forgotten, scoped out on purpose)
+- **Transport encryption.** Pairing now has a real access-control gate (token in `Hello`,
+  checked in `session::handshake`), but the session itself is still plaintext on the LAN.
+  The plan's Noise-protocol design (§3.5/§6) is a substantial standalone piece of work.
+- **In-app QR scanning.** The QR code is real and correctly encodes `palmtop://host:port/token`;
+  scanning it with the *phone's camera* needs CameraX/ML Kit and permissions — deferred rather
+  than rushed. Today the token reaches the client the same way host/port do (`--es token ...`,
+  then persisted).
+- **Android NSD (mDNS) browsing.** Host-side advertisement is real and verified (active query
+  → real response over actual mDNS multicast). The client-side discovery UI is not built yet;
+  connecting still uses a known host/port.
+- **True display-latency measurement** still needs external hardware (camera/photodiode) —
+  unchanged from the Phase 0 finding.
+
+### Try it
+```sh
+# one-time: config/host.toml exists, an Android device profile is set up (see above)
+./scripts/install-service.sh      # builds + installs + starts palmtopd as a systemd --user service
+./scripts/run-client.sh           # builds + installs + launches the real client on the phone
+```
+The daemon prints a QR code + host/port/token on every start (`journalctl --user -u palmtopd -f`
+once installed as a service). Phone must be unlocked for the video surface to attach.
+
 To unblock the Android client: install Android SDK + NDK and set `ANDROID_HOME`.

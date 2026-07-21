@@ -1,0 +1,9 @@
+[package]
+name = "palmtop-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol shared by the host daemon and Android client: framed video, input, and control messages."
+
+[dependencies]
+anyhow = "1"
