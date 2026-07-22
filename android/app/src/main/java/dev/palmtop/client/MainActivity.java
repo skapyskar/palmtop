@@ -95,7 +95,11 @@ public class MainActivity extends Activity {
     private volatile NoiseTransport noise;
 
     private SurfaceView surfaceView;
-    private SurfaceHolder surfaceHolder;
+    // Cross-thread: the network thread reads this for every configureCodec
+    // call rather than trusting a value captured once at connect time, so a
+    // surface recreated mid-session (see wireSurfaceCallbacks) is never
+    // configured against a stale, already-destroyed holder.
+    private volatile SurfaceHolder surfaceHolder;
     /** The video's actual home -- see {@link #buildVideoContainer()} and
      *  {@link #resizeSurfaceToFit}. */
     private FrameLayout videoContainer;
@@ -540,12 +544,59 @@ public class MainActivity extends Activity {
     private void wireSurfaceCallbacks() {
         videoClip.setOnTouchListener(this::onTouch);
         surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            /**
+             * A live network session must survive a surface recreation.
+             *
+             * <p>Found from a real report of a device that could never see
+             * any video: every "screen sharing approved" was followed within
+             * ~150ms by the connection dying, forever, in a loop that kept
+             * re-asking the laptop for permission. The trigger is
+             * {@link #resizeSurfaceToFit}, called the instant the first
+             * VideoConfig arrives -- it changes surfaceView's actual pixel
+             * size, which on some OEM builds causes Android to destroy and
+             * recreate the underlying Surface (a known, vendor-dependent
+             * SurfaceView quirk; it did not reproduce on the reporter's own
+             * phone, which is exactly the shape of a device-specific bug).
+             * The old code treated every surfaceCreated as "start a brand
+             * new session", so this destroy/recreate forced a full
+             * reconnect and a fresh screen-share consent every time --
+             * meaning the picture could never actually arrive, no matter
+             * how many times the dialog was approved.
+             *
+             * <p>The fix is to stop conflating the two lifecycles. A
+             * connected session with a known {@link #videoConfig} just needs
+             * its decoder rebound to the new surface; the socket, the Noise
+             * session and the laptop's permission grant are untouched by
+             * any of this and must stay that way. Only when there is no
+             * live session yet does a new surface mean "start one".
+             */
             @Override public void surfaceCreated(SurfaceHolder holder) {
                 surfaceHolder = holder;
-                startConnection();
+                if (connected && videoConfig != null) {
+                    try {
+                        releaseCodec();
+                        configureCodec(holder, videoConfig.width, videoConfig.height);
+                        SessionLog.info("app",
+                                "video surface was recreated by the system -- decoder rebound, "
+                                        + "connection untouched");
+                    } catch (IOException e) {
+                        SessionLog.error("app", "could not rebind the decoder to the new surface: "
+                                + e.getMessage());
+                    }
+                } else {
+                    startConnection();
+                }
             }
             @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int ht) {}
-            @Override public void surfaceDestroyed(SurfaceHolder h) { generation++; }
+            /**
+             * Deliberately does not touch the network session -- see
+             * surfaceCreated. Only the decoder's binding to this now-invalid
+             * Surface needs to go; feedDecoder already degrades to silently
+             * dropping frames when no codec is consuming them (its input-buffer
+             * queue simply stops being filled), so no other guard is needed
+             * while this surface is briefly gone.
+             */
+            @Override public void surfaceDestroyed(SurfaceHolder h) { releaseCodec(); }
         });
     }
 
@@ -1320,7 +1371,16 @@ public class MainActivity extends Activity {
             Protocol.Received cfg = readInitialVideoConfig(rawIn);
             applyInitialVideoConfig(cfg, myGeneration);
 
-            configureCodec(holder, cfg.width, cfg.height);
+            // Reads the live field rather than trusting the `holder` this thread
+            // was started with -- if the surface was recreated in the gap
+            // between connecting and here (the same race the very first
+            // report of this bug came from), that captured reference would
+            // already be pointing at a destroyed surface.
+            SurfaceHolder liveHolder = surfaceHolder;
+            if (liveHolder == null) {
+                throw new IOException("no video surface is currently available");
+            }
+            configureCodec(liveHolder, cfg.width, cfg.height);
             connected = true;
 
             Thread writer = new Thread(() -> runWriter(rawOut, myGeneration), "palmtop-writer");
@@ -1337,7 +1397,7 @@ public class MainActivity extends Activity {
                 } else if (msg.tag == Protocol.TAG_PONG) {
                     latency.onPong(msg.tClientUs, msg.tHostRecvUs, msg.tHostSendUs, nowUs());
                 } else if (msg.tag == Protocol.TAG_VIDEO_CONFIG) {
-                    handleVideoConfigChange(msg, holder);
+                    handleVideoConfigChange(msg, surfaceHolder);
                 } else if (msg.tag == Protocol.TAG_STATUS) {
                     handleStatus(msg);
                 }
@@ -1562,7 +1622,15 @@ public class MainActivity extends Activity {
             Log.i(TAG, "stream format changed to " + msg.width + "x" + msg.height
                     + " -- rebuilding decoder");
             releaseCodec();
-            configureCodec(holder, msg.width, msg.height);
+            // A null holder here means the surface is between destroy and
+            // recreate right now -- releasing the old codec (above) is still
+            // correct, and surfaceCreated's own rebind path (see
+            // wireSurfaceCallbacks) will configure the new one using this
+            // videoConfig the moment the surface comes back, so there is
+            // nothing to configure against yet rather than something wrong.
+            if (holder != null) {
+                configureCodec(holder, msg.width, msg.height);
+            }
         }
         runOnUiThread(() -> {
             updateModeButton();
