@@ -132,7 +132,7 @@ jobs:
       - name: Fetch adb
         run: |
           curl -fsSL -o /tmp/platform-tools.zip \
-            https://dl.google.com/android/repo/platform-tools-latest-linux.zip
+            https://dl.google.com/android/repository/platform-tools-latest-linux.zip
           mkdir -p adb-tools
           unzip -q /tmp/platform-tools.zip -d /tmp/platform-tools
           cp /tmp/platform-tools/platform-tools/adb adb-tools/
