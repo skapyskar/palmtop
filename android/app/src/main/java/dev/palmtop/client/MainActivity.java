@@ -2,7 +2,6 @@ package dev.palmtop.client;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.graphics.Color;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
@@ -300,57 +299,77 @@ public class MainActivity extends Activity {
     private LinearLayout buildLeftBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.VERTICAL);
-        bar.setBackgroundColor(Color.argb(160, 0, 0, 0));
-        int pad = (int) (4 * getResources().getDisplayMetrics().density);
-        bar.setPadding(pad, pad, pad, pad);
+        bar.setBackgroundColor(Ui.PANEL);
+        bar.setPadding(Ui.md(this), Ui.md(this), Ui.md(this), Ui.md(this));
 
-        statusView = new TextView(this);
-        statusView.setTextColor(Color.GREEN);
-        statusView.setTextSize(11);
-        bar.addView(statusView);
+        // Monospaced and muted at rest. This line is read as data -- an
+        // address, a resolution, a frame count -- and proportional type makes
+        // those numbers jitter sideways every time they update. Its colour is
+        // the app's one live signal, so it is the *only* thing here that is
+        // ever saturated: green connected, red failed (see handleStatus and
+        // runNetwork's catch).
+        statusView = Ui.mono(this);
+        bar.addView(statusView, Ui.stacked(this, 10));
 
         // Always-available escape hatch: retry the connection in place
         // (network hiccup, host restarted, portal dialog dismissed by
         // mistake, ...) without needing another adb-launched Intent.
-        reconnectButton = new Button(this);
-        reconnectButton.setText("⟳ Reconnect");
+        reconnectButton = Ui.button(this, "⟳  Reconnect");
         reconnectButton.setOnClickListener(v -> startConnection());
-        bar.addView(reconnectButton);
+        bar.addView(reconnectButton, Ui.stacked(this, 6));
 
-        devicesButton = new Button(this);
-        devicesButton.setText("🖥 Devices");
+        devicesButton = Ui.button(this, "🖥  Devices");
         devicesButton.setOnClickListener(v -> openDeviceList());
-        bar.addView(devicesButton);
+        bar.addView(devicesButton, Ui.stacked(this, 6));
 
-        hud = new HudView(this);
-        bar.addView(hud);
-
-        modeButton = new Button(this);
+        modeButton = Ui.button(this, "");
         modeButton.setOnClickListener(v -> showModePicker());
-        bar.addView(modeButton);
+        bar.addView(modeButton, Ui.stacked(this, 6));
         updateModeButton();
 
-        aspectButton = new Button(this);
+        aspectButton = Ui.button(this, "");
         aspectButton.setOnClickListener(v -> showAspectPicker());
-        bar.addView(aspectButton);
+        bar.addView(aspectButton, Ui.stacked(this, 10));
         updateAspectButton();
 
-        logButton = new Button(this);
-        logButton.setText("📋");
+        // The three icon-only controls share one row rather than each taking a
+        // full-width slab. Three near-empty full-width buttons is most of what
+        // made this column read as unfinished, and it spent vertical space the
+        // column does not have on a landscape phone.
+        LinearLayout iconRow = new LinearLayout(this);
+        iconRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        logButton = Ui.iconButton(this, "📋");
         logButton.setOnClickListener(v -> showSessionLog());
-        bar.addView(logButton);
+        iconRow.addView(logButton, iconSlot(0));
 
-        hudToggle = new Button(this);
-        hudToggle.setText("📊");
+        hudToggle = Ui.iconButton(this, "📊");
         hudToggle.setOnClickListener(v -> hud.setShown(!hud.isHudShown()));
-        bar.addView(hudToggle);
+        iconRow.addView(hudToggle, iconSlot(Ui.dp(this, 6)));
 
-        kbToggle = new Button(this);
-        kbToggle.setText("⌨");
+        kbToggle = Ui.iconButton(this, "⌨");
         kbToggle.setOnClickListener(v -> showKeyboard());
-        bar.addView(kbToggle);
+        iconRow.addView(kbToggle, iconSlot(Ui.dp(this, 6)));
+
+        bar.addView(iconRow, Ui.stacked(this, 10));
+
+        // Below the controls, not above them: the HUD is diagnostic, appears
+        // only when toggled on, and would otherwise shove every button down
+        // the column the moment it did.
+        hud = new HudView(this);
+        bar.addView(hud, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         return bar;
+    }
+
+    /** Equal-width slot in the icon row. Weighted with a zero base width so
+     *  the three share the column exactly, whatever glyph each one carries. */
+    private LinearLayout.LayoutParams iconSlot(int leftMargin) {
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f);
+        lp.leftMargin = leftMargin;
+        return lp;
     }
 
     /**
@@ -388,7 +407,7 @@ public class MainActivity extends Activity {
      */
     private FrameLayout buildVideoContainer() {
         videoContainer = new FrameLayout(this);
-        videoContainer.setBackgroundColor(Color.BLACK);
+        videoContainer.setBackgroundColor(Ui.BASE);
         videoContainer.setClipChildren(true);
 
         videoClip = new FrameLayout(this);
@@ -675,23 +694,20 @@ public class MainActivity extends Activity {
             dismissSessionLog();
             return;
         }
-        LinearLayout overlay = new LinearLayout(this);
-        overlay.setOrientation(LinearLayout.VERTICAL);
-        overlay.setBackgroundColor(0xEE000000);
-        int pad = (int) (12 * getResources().getDisplayMetrics().density);
-        overlay.setPadding(pad, pad, pad, pad);
+        LinearLayout overlay = Ui.sheet(this);
 
-        TextView title = new TextView(this);
-        title.setText("Session log");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(20);
-        overlay.addView(title);
+        overlay.addView(Ui.title(this, "Session log"), Ui.stacked(this, 2));
+        TextView subtitle = Ui.body(this,
+                "What this phone and the laptop each reported, most recent last.");
+        subtitle.setTextColor(Ui.TEXT_FAINT);
+        overlay.addView(subtitle, Ui.stacked(this, 12));
+        overlay.addView(Ui.hairline(this), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 1)));
 
-        TextView body = new TextView(this);
-        body.setTextColor(Color.LTGRAY);
-        body.setTextSize(11);
-        body.setTypeface(android.graphics.Typeface.MONOSPACE);
+        TextView body = Ui.mono(this);
         ScrollView scroll = new ScrollView(this);
+        scroll.setPadding(0, Ui.md(this), 0, Ui.md(this));
+        scroll.setClipToPadding(false);
         scroll.addView(body);
         overlay.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -704,10 +720,10 @@ public class MainActivity extends Activity {
                   .append(e.message).append("\n");
                 int color;
                 switch (e.level) {
-                    case ERROR: color = 0xFFFF6B6B; break;
-                    case WARN:  color = 0xFFFFD166; break;
-                    case GOOD:  color = 0xFF7BE495; break;
-                    default:    color = Color.LTGRAY;
+                    case ERROR: color = Ui.ERR; break;
+                    case WARN:  color = Ui.WARN; break;
+                    case GOOD:  color = Ui.OK; break;
+                    default:    color = Ui.TEXT_MUTED;
                 }
                 sb.setSpan(new ForegroundColorSpan(color), start, sb.length(),
                         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -726,8 +742,7 @@ public class MainActivity extends Activity {
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
 
-        Button copy = new Button(this);
-        copy.setText("Copy");
+        Button copy = Ui.quietButton(this, "Copy");
         copy.setOnClickListener(v -> {
             android.content.ClipboardManager cm =
                     (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
@@ -738,12 +753,16 @@ public class MainActivity extends Activity {
                         .show();
             }
         });
-        buttons.addView(copy);
+        LinearLayout.LayoutParams half =
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        buttons.addView(copy, half);
 
-        Button close = new Button(this);
-        close.setText("Close");
+        Button close = Ui.primaryButton(this, "Close");
         close.setOnClickListener(v -> dismissSessionLog());
-        buttons.addView(close);
+        LinearLayout.LayoutParams halfRight =
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        halfRight.leftMargin = Ui.sm(this);
+        buttons.addView(close, halfRight);
         overlay.addView(buttons);
 
         logOverlayView = overlay;
@@ -762,65 +781,61 @@ public class MainActivity extends Activity {
     private void showDeviceListOverlay(FrameLayout root) {
         LinearLayout overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.VERTICAL);
-        overlay.setBackgroundColor(Color.BLACK);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        overlay.setPadding(pad, pad, pad, pad);
+        overlay.setBackgroundColor(Ui.PANEL);
+        overlay.setPadding(Ui.xl(this), Ui.lg(this), Ui.xl(this), Ui.lg(this));
+        overlay.setClickable(true);
         discoveryRoot = root;
         discoveryOverlayView = overlay;
 
-        TextView title = new TextView(this);
-        title.setText("Devices");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(22);
-        overlay.addView(title);
-
         List<PairedDevice> devices = DeviceStore.load(this);
 
-        TextView hint = new TextView(this);
-        hint.setTextColor(Color.LTGRAY);
-        hint.setPadding(0, pad / 2, 0, pad / 2);
-        hint.setText(devices.isEmpty()
-                ? "No laptops paired yet. Connect this phone to your laptop by USB and run "
-                  + "the setup command shown in the README, or scan the QR code palmtopd prints."
+        overlay.addView(Ui.title(this, "Devices"), Ui.stacked(this, 2));
+
+        TextView hint = Ui.body(this, devices.isEmpty()
+                ? "No laptops paired yet. Add one over USB, or scan the QR code the laptop "
+                  + "prints when you run its install script."
                 : "Tap a laptop to connect. Long-press to forget it.");
-        overlay.addView(hint);
+        overlay.addView(hint, Ui.stacked(this, 12));
+        overlay.addView(Ui.hairline(this), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 1)));
 
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         ScrollView scroll = new ScrollView(this);
+        scroll.setPadding(0, Ui.md(this), 0, Ui.md(this));
+        scroll.setClipToPadding(false);
         scroll.addView(list);
         overlay.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         for (PairedDevice device : devices) {
-            Button entry = new Button(this);
-            entry.setText(device.name + "\n" + device.subtitle());
+            // Name and address are two levels of information, so they read as
+            // two: the laptop's name at full strength, where it was last seen
+            // muted and monospaced underneath it.
+            Button entry = Ui.rowButton(this, device.name, device.subtitle(), false);
             entry.setOnClickListener(v -> connectToSaved(root, overlay, device));
             entry.setOnLongClickListener(v -> {
                 confirmForget(root, overlay, device);
                 return true;
             });
-            list.addView(entry);
+            list.addView(entry, Ui.stacked(this, 6));
         }
 
-        Button usbSetup = new Button(this);
-        usbSetup.setText("🔌 Add over USB");
+        Button usbSetup = Ui.button(this, "🔌   Add over USB");
         usbSetup.setOnClickListener(v -> showUsbPairingHelp());
-        overlay.addView(usbSetup);
+        overlay.addView(usbSetup, Ui.stacked(this, 6));
 
-        Button scanQrButton = new Button(this);
-        scanQrButton.setText("📷 Add by scanning QR");
+        Button scanQrButton = Ui.button(this, "📷   Add by scanning QR");
         scanQrButton.setOnClickListener(v ->
                 startActivityForResult(new Intent(this, QrScanActivity.class), REQUEST_SCAN_QR));
-        overlay.addView(scanQrButton);
+        overlay.addView(scanQrButton, Ui.stacked(this, 6));
 
-        Button findButton = new Button(this);
-        findButton.setText("📡 Find on this network");
+        Button findButton = Ui.button(this, "📡   Find on this network");
         findButton.setOnClickListener(v -> {
             root.removeView(overlay);
             showDiscoveryOverlay(root);
         });
-        overlay.addView(findButton);
+        overlay.addView(findButton, Ui.stacked(this, 0));
 
         root.addView(overlay, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -904,29 +919,23 @@ public class MainActivity extends Activity {
     private void showDiscoveryOverlay(FrameLayout root) {
         LinearLayout overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.VERTICAL);
-        overlay.setBackgroundColor(Color.BLACK);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        overlay.setPadding(pad, pad, pad, pad);
+        overlay.setBackgroundColor(Ui.PANEL);
+        int pad = Ui.lg(this);
+        overlay.setPadding(Ui.xl(this), pad, Ui.xl(this), pad);
+        overlay.setClickable(true);
         discoveryRoot = root;
         discoveryOverlayView = overlay;
 
-        TextView title = new TextView(this);
-        title.setText("Find a Palmtop host");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(20);
-        overlay.addView(title);
+        overlay.addView(Ui.title(this, "Find a laptop"), Ui.stacked(this, 12));
 
-        Button scanQrButton = new Button(this);
-        scanQrButton.setText("📷 Scan QR code");
+        Button scanQrButton = Ui.button(this, "📷   Scan QR code");
         scanQrButton.setOnClickListener(v ->
                 startActivityForResult(new Intent(this, QrScanActivity.class), REQUEST_SCAN_QR));
-        overlay.addView(scanQrButton);
+        overlay.addView(scanQrButton, Ui.stacked(this, 12));
 
-        TextView hint = new TextView(this);
-        hint.setText("Scanning for palmtopd on this Wi-Fi network...");
-        hint.setTextColor(Color.LTGRAY);
-        hint.setPadding(0, pad / 2, 0, pad);
-        overlay.addView(hint);
+        TextView hint = Ui.body(this, "Scanning for palmtopd on this Wi-Fi network…");
+        hint.setTextColor(Ui.TEXT_FAINT);
+        overlay.addView(hint, Ui.stacked(this, 10));
 
         LinearLayout results = new LinearLayout(this);
         results.setOrientation(LinearLayout.VERTICAL);
@@ -952,11 +961,11 @@ public class MainActivity extends Activity {
             @Override public void onHostFound(String name, String foundHost, int foundPort, String foundPubkey) {
                 runOnUiThread(() -> {
                     if (shown.contains(name)) return;
-                    Button entry = new Button(MainActivity.this);
-                    entry.setText(name + "\n" + foundHost + ":" + foundPort);
+                    Button entry = Ui.rowButton(MainActivity.this, name,
+                            foundHost + ":" + foundPort, false);
                     entry.setOnClickListener(v ->
                             promptForTokenAndConnect(root, overlay, foundHost, foundPort, foundPubkey));
-                    results.addView(entry);
+                    results.addView(entry, Ui.stacked(MainActivity.this, 6));
                     shown.add(name);
                 });
             }
@@ -977,24 +986,21 @@ public class MainActivity extends Activity {
      * reasons outside our control (AP client isolation, a network that
      * blocks multicast, etc; see the plan's §9 edge cases). */
     private void buildManualEntrySection(FrameLayout root, LinearLayout overlay, int pad) {
-        TextView manualLabel = new TextView(this);
-        manualLabel.setText("Or enter manually:");
-        manualLabel.setTextColor(Color.LTGRAY);
-        manualLabel.setPadding(0, pad, 0, 0);
-        overlay.addView(manualLabel);
+        overlay.addView(Ui.hairline(this), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 1)));
+        TextView manualLabel = Ui.body(this, "Or enter the details yourself");
+        LinearLayout.LayoutParams labelLp = Ui.stacked(this, 8);
+        labelLp.topMargin = Ui.md(this);
+        overlay.addView(manualLabel, labelLp);
 
-        EditText manualHost = new EditText(this);
-        manualHost.setHint("host (e.g. 192.168.1.42)");
-        overlay.addView(manualHost);
-        EditText manualPort = new EditText(this);
-        manualPort.setHint("port (e.g. 9999)");
+        EditText manualHost = Ui.input(this, "host  (e.g. 192.168.1.42)");
+        overlay.addView(manualHost, Ui.stacked(this, 6));
+        EditText manualPort = Ui.input(this, "port  (e.g. 9999)");
         manualPort.setInputType(InputType.TYPE_CLASS_NUMBER);
-        overlay.addView(manualPort);
-        EditText manualPubkey = new EditText(this);
-        manualPubkey.setHint("pubkey (64 hex chars, from the host's terminal output)");
-        overlay.addView(manualPubkey);
-        Button manualGo = new Button(this);
-        manualGo.setText("Next");
+        overlay.addView(manualPort, Ui.stacked(this, 6));
+        EditText manualPubkey = Ui.input(this, "pubkey  (64 hex characters)");
+        overlay.addView(manualPubkey, Ui.stacked(this, 10));
+        Button manualGo = Ui.primaryButton(this, "Next");
         manualGo.setOnClickListener(v -> {
             String h = manualHost.getText().toString().trim();
             String pStr = manualPort.getText().toString().trim();
@@ -1011,37 +1017,28 @@ public class MainActivity extends Activity {
             FrameLayout root, LinearLayout overlay, String foundHost, int foundPort, String foundPubkey) {
         if (hostDiscovery != null) hostDiscovery.stop();
 
-        LinearLayout tokenRow = new LinearLayout(this);
-        tokenRow.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        tokenRow.setPadding(pad, pad, pad, pad);
-        tokenRow.setBackgroundColor(Color.BLACK);
+        LinearLayout tokenRow = Ui.sheet(this);
+        tokenRow.setBackgroundColor(Ui.PANEL);
 
-        TextView label = new TextView(this);
-        label.setText("Connecting to " + foundHost + ":" + foundPort + "\n\nPairing token "
-                + "(shown on the host's terminal/journal when palmtopd starts):");
-        label.setTextColor(Color.WHITE);
-        tokenRow.addView(label);
+        tokenRow.addView(Ui.title(this, "Connect to " + foundHost), Ui.stacked(this, 2));
+        TextView label = Ui.body(this,
+                "Enter the pairing token the laptop printed when palmtopd started.");
+        tokenRow.addView(label, Ui.stacked(this, 12));
 
-        EditText tokenInput = new EditText(this);
-        tokenInput.setHint("token");
-        tokenRow.addView(tokenInput);
+        EditText tokenInput = Ui.input(this, "pairing token");
+        tokenRow.addView(tokenInput, Ui.stacked(this, 14));
 
         // Pre-filled when mDNS supplied it (the normal case); left editable
         // as a fallback in case an older host doesn't advertise it yet, or
         // discovery didn't resolve TXT records for some reason.
-        TextView pubkeyLabel = new TextView(this);
-        pubkeyLabel.setText("Host public key (for encryption -- auto-filled when discovered):");
-        pubkeyLabel.setTextColor(Color.WHITE);
-        tokenRow.addView(pubkeyLabel);
-        EditText pubkeyInput = new EditText(this);
-        pubkeyInput.setHint("pubkey (64 hex chars)");
+        TextView pubkeyLabel = Ui.body(this, "Host public key — filled in automatically");
+        tokenRow.addView(pubkeyLabel, Ui.stacked(this, 6));
+        EditText pubkeyInput = Ui.input(this, "pubkey  (64 hex characters)");
         pubkeyInput.setText(foundPubkey == null ? "" : foundPubkey);
-        tokenRow.addView(pubkeyInput);
+        tokenRow.addView(pubkeyInput, Ui.stacked(this, 14));
 
-        Button connectBtn = new Button(this);
-        connectBtn.setText("Connect");
-        tokenRow.addView(connectBtn);
+        Button connectBtn = Ui.primaryButton(this, "Connect");
+        tokenRow.addView(connectBtn, Ui.stacked(this, 0));
 
         root.addView(tokenRow, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -1050,7 +1047,7 @@ public class MainActivity extends Activity {
             String enteredToken = tokenInput.getText().toString().trim();
             String enteredPubkey = pubkeyInput.getText().toString().trim();
             if (enteredPubkey.isEmpty()) {
-                pubkeyLabel.setTextColor(Color.RED);
+                pubkeyLabel.setTextColor(Ui.ERR);
                 pubkeyLabel.setText("Host public key is required -- check the host's terminal output.");
                 return;
             }
@@ -1103,7 +1100,7 @@ public class MainActivity extends Activity {
         SessionLog.startSession();
         SessionLog.info("app", "Palmtop " + appVersion() + ", protocol v" + Protocol.VERSION);
         SessionLog.info("net", "connecting to " + host + ":" + port);
-        statusView.setTextColor(Color.GREEN);
+        statusView.setTextColor(Ui.ACCENT);
         statusView.setText("connecting to " + host + ":" + port + " ...");
         new Thread(() -> runNetwork(surfaceHolder, myGeneration), "palmtop-net").start();
     }
@@ -1418,7 +1415,7 @@ public class MainActivity extends Activity {
             }
             if (generation == myGeneration) {
                 runOnUiThread(() -> {
-                    statusView.setTextColor(Color.RED);
+                    statusView.setTextColor(Ui.ERR);
                     statusView.setText("ERROR: " + e + "\n\ntap ⟳ Reconnect to retry");
                 });
             }
@@ -1503,7 +1500,7 @@ public class MainActivity extends Activity {
         final String detail = msg.detail;
         runOnUiThread(() -> {
             if (statusView == null) return;
-            statusView.setTextColor(failed ? Color.RED : Color.WHITE);
+            statusView.setTextColor(failed ? Ui.ERR : Ui.TEXT_MUTED);
             statusView.setText(failed ? ("ERROR: " + detail) : detail);
         });
     }
@@ -1526,7 +1523,9 @@ public class MainActivity extends Activity {
         dropBudgetUs = cfg.dropBudgetMs * 1000L;
         if (generation == myGeneration) {
             runOnUiThread(() -> {
-                statusView.setText("connected " + host + ":" + port + "\n"
+                // The one moment worth colouring: the stream is actually live.
+                statusView.setTextColor(Ui.OK);
+                statusView.setText("● connected  " + host + ":" + port + "\n"
                         + cfg.width + "x" + cfg.height + "@" + cfg.fps + "fps");
                 resizeSurfaceToFit(cfg.width, cfg.height);
             });
@@ -1601,9 +1600,12 @@ public class MainActivity extends Activity {
                 stats.decodeP50, stats.dropPercent, vc.width, vc.height, vc.fps,
                 stats.valid));
         runOnUiThread(() -> {
-            statusView.setText(host + ":" + port + "  "
+            // Steady state drops back to muted: once the picture is up, the
+            // status line is reference information, not an alert.
+            statusView.setTextColor(Ui.TEXT_MUTED);
+            statusView.setText(host + ":" + port + "\n"
                     + vc.width + "x" + vc.height + "@" + vc.fps + "fps\n"
-                    + "decoded " + d + "  dropped-stale " + sk);
+                    + "decoded " + d + "   stale " + sk);
             hud.update(stats, Modes.nameOf(currentMode), vc.width, vc.height, vc.fps);
         });
     }

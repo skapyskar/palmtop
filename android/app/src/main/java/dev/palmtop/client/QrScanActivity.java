@@ -178,9 +178,11 @@ public class QrScanActivity extends ComponentActivity {
 
         statusView = new TextView(this);
         statusView.setText("Point the camera at palmtopd's QR code — tap to focus");
-        statusView.setTextColor(Color.WHITE);
-        statusView.setBackgroundColor(Color.argb(160, 0, 0, 0));
-        statusView.setTextSize(16);
+        statusView.setTextColor(Ui.TEXT);
+        statusView.setBackgroundColor(Ui.SCRIM);
+        statusView.setTypeface(Ui.medium());
+        statusView.setTextSize(Ui.TEXT_BODY);
+        statusView.setPadding(Ui.lg(this), Ui.md(this), Ui.lg(this), Ui.md(this));
         FrameLayout.LayoutParams statusLp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
         statusLp.gravity = Gravity.TOP;
@@ -454,7 +456,7 @@ public class QrScanActivity extends ComponentActivity {
     }
 
     private void finishWithError(String message) {
-        statusView.setTextColor(Color.RED);
+        statusView.setTextColor(Ui.ERR);
         statusView.setText(message);
         setResult(RESULT_CANCELED);
     }

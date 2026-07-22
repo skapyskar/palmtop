@@ -33,10 +33,10 @@ final class HudView extends View {
     HudView(Context context) {
         super(context);
         float density = getResources().getDisplayMetrics().density;
-        text.setColor(Color.WHITE);
-        text.setTextSize(12f * density);
+        text.setColor(Ui.TEXT_MUTED);
+        text.setTextSize(11.5f * density);
         text.setTypeface(Typeface.MONOSPACE);
-        background.setColor(Color.argb(170, 0, 0, 0));
+        background.setColor(Ui.RAISED);
         setVisibility(GONE);
     }
 
@@ -100,7 +100,11 @@ final class HudView extends View {
         float pad = padPx();
         float lineHeight = lineHeightPx();
 
-        canvas.drawRect(0, 0, getWidth(), getHeight(), background);
+        // Rounded to match every other surface in the column -- a square
+        // block here was the one element still reading as a debug overlay
+        // rather than as part of the app.
+        float radius = 10f * getResources().getDisplayMetrics().density;
+        canvas.drawRoundRect(0, 0, getWidth(), getHeight(), radius, radius, background);
 
         float y = pad + text.getTextSize();
         for (String line : snapshot) {

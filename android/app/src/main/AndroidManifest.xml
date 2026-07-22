@@ -12,6 +12,7 @@
 
     <application
         android:label="Palmtop"
+        android:theme="@style/Theme.Palmtop"
         android:usesCleartextTraffic="true"
         android:hardwareAccelerated="true">
         <activity

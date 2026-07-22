@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The app's only resource file. Everything else about this UI is built in Java
+  (see Ui.java), but a theme cannot be: the title bar and the window's own
+  background colour are both decided by the system before any of our code runs.
+
+  Theme.Material.NoActionBar, not Light: this is a dark interface that sits
+  beside streamed video, and inheriting the light theme would give every
+  AlertDialog (the quality-mode and aspect-ratio pickers) a white panel that
+  flashes against the rest of the app.
+-->
+<resources>
+    <style name="Theme.Palmtop" parent="@android:style/Theme.Material.NoActionBar">
+        <!-- Removes the persistent bar showing the app label at the top of
+             every screen. It cost a strip of a landscape phone's already
+             short height and told the user nothing they did not know. -->
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+
+        <!-- Matches Ui.BASE. Without this the window is the platform's default
+             grey/white until the first frame is drawn, which shows up as a
+             flash on launch and behind the system bars. -->
+        <item name="android:windowBackground">#FF0A0C0E</item>
+        <item name="android:colorBackground">#FF0A0C0E</item>
+        <item name="android:statusBarColor">#FF0A0C0E</item>
+        <item name="android:navigationBarColor">#FF0A0C0E</item>
+        <item name="android:colorAccent">#FF4C9FFF</item>
+    </style>
+</resources>
