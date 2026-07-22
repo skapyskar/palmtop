@@ -20,20 +20,71 @@ android {
     }
 
     signingConfigs {
-        // Reuses the same debug keystore the old manual build.sh generated,
-        // so `adb install -r` over an existing install doesn't hit a
-        // signature mismatch. Generated on demand if missing.
-        create("palmtopDebug") {
-            storeFile = file("../../android-spike/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        // Reuses the debug keystore the old manual build.sh generated, so
+        // `adb install -r` over an existing install on a development phone
+        // doesn't hit a signature mismatch.
+        //
+        // Conditional because that keystore is deliberately not committed:
+        // on a fresh clone or in CI it simply isn't there, and an
+        // unconditional reference would fail the build at configuration time
+        // for someone who only wanted to compile. Absent it, AGP falls back
+        // to its own auto-generated debug key, which is fine -- the only
+        // cost is having to uninstall before reinstalling on a phone that
+        // already has a differently-signed debug build.
+        val debugKeystore = file("../../android-spike/debug.keystore")
+        if (debugKeystore.exists()) {
+            create("palmtopDebug") {
+                storeFile = debugKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+
+        // Release signing, configured entirely from the environment.
+        //
+        // No key material is committed, and none can be: the keystore is
+        // decoded from a secret at build time in CI and the file itself is
+        // gitignored locally. That matters more than usual for Android --
+        // the signing key *is* the app's identity to every device that has
+        // ever installed it, so a leaked key lets anyone ship a malicious
+        // "update", and a lost key means never being able to update the app
+        // again for existing users. It cannot be rotated.
+        //
+        // Falls through to null when the env vars are absent, so an ordinary
+        // `assembleDebug` on a fresh clone still works with no setup.
+        val keystorePath = System.getenv("PALMTOP_KEYSTORE")
+        if (keystorePath != null && file(keystorePath).exists()) {
+            create("palmtopRelease") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("PALMTOP_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("PALMTOP_KEY_ALIAS")
+                keyPassword = System.getenv("PALMTOP_KEY_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("palmtopDebug")
+            // findByName, not getByName: the shared debug keystore is
+            // optional (see above), and null here means AGP's own default.
+            signingConfigs.findByName("palmtopDebug")?.let { signingConfig = it }
+        }
+        release {
+            // Unsigned when no keystore is configured, which is a deliberate,
+            // visible failure: an APK accidentally signed with the *debug*
+            // key would install and run perfectly well while being
+            // permanently un-updatable by a properly signed release, and
+            // nothing about it would look wrong until far too late.
+            signingConfig = signingConfigs.findByName("palmtopRelease")
+
+            // Left off on purpose. R8 would strip the reflective entry points
+            // that Noise, CameraX and ML Kit rely on, and this app is not
+            // large enough for the size win to be worth debugging obfuscated
+            // stack traces from users. Revisit only with a tested keep-rules
+            // file, never as a default.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

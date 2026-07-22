@@ -4,3 +4,10 @@
 /*/build/
 /captures/
 .cxx/
+
+# Release signing key. Never commit: the signing key IS the app's identity to
+# every device that installed it, it cannot be rotated, and leaking it lets
+# anyone publish a malicious "update" to existing users.
+*.jks
+*.keystore
+keystore.properties
