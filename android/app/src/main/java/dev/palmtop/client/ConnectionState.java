@@ -95,6 +95,17 @@ final class ConnectionState {
                 .apply();
     }
 
+    /**
+     * The quality mode to start in: an explicit `--ei mode N` override if
+     * the launching Intent carried one (which is what lets
+     * scripts/measure-latency.sh drive a run through all four presets
+     * unattended), otherwise whatever the user last chose.
+     */
+    static int resolveMode(Context ctx, int intentMode) {
+        int mode = intentMode >= 0 ? intentMode : prefs(ctx).getInt("mode", Modes.BALANCED);
+        return Modes.isValid(mode) ? mode : Modes.BALANCED;
+    }
+
     static void saveMode(Context ctx, int mode) {
         prefs(ctx).edit().putInt("mode", mode).apply();
     }

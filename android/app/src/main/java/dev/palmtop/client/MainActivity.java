@@ -101,6 +101,10 @@ public class MainActivity extends Activity {
      *  {@link #buildVideoContainer()}'s doc comment for why this exists as
      *  a separate view from videoContainer itself. */
     private FrameLayout videoClip;
+    /** The activity's root view, kept so overlays (Devices, discovery)
+     *  can be attached and removed without re-deriving it from the view
+     *  tree each time. */
+    private FrameLayout rootLayout;
     private TextView statusView;
     private EditText hiddenInput;
     private Button kbToggle;
@@ -108,6 +112,7 @@ public class MainActivity extends Activity {
     private Button modeButton;
     private Button aspectButton;
     private Button hudToggle;
+    private Button devicesButton;
     private HudView hud;
     /** Turns 3+-finger touches into a local zoom/pan on {@link #surfaceView}
      *  -- see its class doc comment. Constructed once, alongside surfaceView,
@@ -190,23 +195,31 @@ public class MainActivity extends Activity {
         // to whatever was last persisted -- see its class doc comment for why
         // (reopening via the launcher icon sends a bare ACTION_MAIN Intent
         // with no extras).
-        ConnectionState conn = ConnectionState.resolve(this,
-                getIntent().getStringExtra("host"), getIntent().getIntExtra("port", 0),
-                getIntent().getStringExtra("token"), getIntent().getStringExtra("pubkey"),
-                getIntent().getIntExtra("mode", -1));
-        host = conn.host;
-        port = conn.port;
-        token = conn.token;
-        pubkey = conn.pubkey;
-        currentMode = conn.mode;
+        // Quality mode and aspect ratio are app-wide settings; which laptop
+        // to talk to is a separate concern owned by DeviceStore.
+        currentMode = ConnectionState.resolveMode(this, getIntent().getIntExtra("mode", -1));
         currentAspectMode = ConnectionState.loadAspectMode(this);
 
+        // Three ways in, in priority order:
+        //  1. credentials pushed by the laptop's USB pairing step (an Intent
+        //     with extras) -- always authoritative, and saved on arrival
+        //  2. the most recently used saved device, for an ordinary relaunch
+        //  3. nothing saved yet -> the Devices screen, which offers pairing
+        PairedDevice launched = deviceFromIntent();
+        if (launched != null) {
+            DeviceStore.upsert(this, launched.withLastConnectedNow());
+            applyDevice(launched);
+        } else {
+            applyDevice(DeviceStore.mostRecent(this));
+        }
+
         FrameLayout root = buildUi();
+        rootLayout = root;
         setContentView(root);
 
-        if (!conn.hasHost() || !conn.hasPubkey()) {
+        if (host == null || host.isEmpty() || port == 0 || pubkey == null || pubkey.isEmpty()) {
             setControlsVisible(false);
-            showDiscoveryOverlay(root);
+            showDeviceListOverlay(root);
             return;
         }
 
@@ -294,6 +307,11 @@ public class MainActivity extends Activity {
         reconnectButton.setText("⟳ Reconnect");
         reconnectButton.setOnClickListener(v -> startConnection());
         bar.addView(reconnectButton);
+
+        devicesButton = new Button(this);
+        devicesButton.setText("🖥 Devices");
+        devicesButton.setOnClickListener(v -> openDeviceList());
+        bar.addView(devicesButton);
 
         hud = new HudView(this);
         bar.addView(hud);
@@ -490,6 +508,7 @@ public class MainActivity extends Activity {
         modeButton.setVisibility(v);
         aspectButton.setVisibility(v);
         hudToggle.setVisibility(v);
+        devicesButton.setVisibility(v);
     }
 
     /** Wires touch input and surface lifecycle -- shared by the direct-connect
@@ -518,6 +537,189 @@ public class MainActivity extends Activity {
             @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int ht) {}
             @Override public void surfaceDestroyed(SurfaceHolder h) { generation++; }
         });
+    }
+
+    // ------------------------------------------------------------ paired devices
+
+    /**
+     * Credentials handed over by the laptop during USB pairing, which pushes
+     * them straight into the app as Intent extras over ADB.
+     *
+     * That cable is the reason this path exists at all: it is genuinely
+     * out-of-band, so the host's public key arrives over a channel an
+     * attacker on the network cannot reach. Compare the mDNS discovery path,
+     * where the key is broadcast over the LAN and a hostile peer on the same
+     * network could in principle answer first.
+     *
+     * @return the device described by the launching Intent, or null when it
+     *     carries no pairing extras (an ordinary relaunch from the launcher).
+     */
+    private PairedDevice deviceFromIntent() {
+        String h = getIntent().getStringExtra("host");
+        int p = getIntent().getIntExtra("port", 0);
+        String t = getIntent().getStringExtra("token");
+        String pk = getIntent().getStringExtra("pubkey");
+        String name = getIntent().getStringExtra("name");
+        if (h == null || h.isEmpty() || p == 0 || pk == null || pk.isEmpty()) return null;
+        return new PairedDevice(
+                name == null || name.isEmpty() ? h : name,
+                h, p, t == null ? "" : t, pk, System.currentTimeMillis());
+    }
+
+    /** Reopens the Devices screen mid-session, to switch laptops without
+     *  restarting the app. Tears the live session down first so the old
+     *  connection cannot keep decoding into a surface the new one is
+     *  about to claim. */
+    private void openDeviceList() {
+        generation++; // orphans the in-flight network/writer threads
+        teardown();
+        setControlsVisible(false);
+        showDeviceListOverlay(rootLayout);
+    }
+
+    /** Points this session at a saved device. Null clears the target, which
+     *  is what sends onCreate to the Devices screen. */
+    private void applyDevice(PairedDevice device) {
+        if (device == null) {
+            host = null;
+            port = 0;
+            token = "";
+            pubkey = "";
+            return;
+        }
+        host = device.host;
+        port = device.port;
+        token = device.token;
+        pubkey = device.pubkey;
+    }
+
+    /**
+     * The Devices screen: every laptop this phone has been paired with, plus
+     * the ways to add another.
+     *
+     * Shown automatically when nothing is saved yet, and reachable from the
+     * sidebar at any time to switch machines.
+     */
+    private void showDeviceListOverlay(FrameLayout root) {
+        LinearLayout overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setBackgroundColor(Color.BLACK);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        overlay.setPadding(pad, pad, pad, pad);
+        discoveryRoot = root;
+        discoveryOverlayView = overlay;
+
+        TextView title = new TextView(this);
+        title.setText("Devices");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(22);
+        overlay.addView(title);
+
+        List<PairedDevice> devices = DeviceStore.load(this);
+
+        TextView hint = new TextView(this);
+        hint.setTextColor(Color.LTGRAY);
+        hint.setPadding(0, pad / 2, 0, pad / 2);
+        hint.setText(devices.isEmpty()
+                ? "No laptops paired yet. Connect this phone to your laptop by USB and run "
+                  + "the setup command shown in the README, or scan the QR code palmtopd prints."
+                : "Tap a laptop to connect. Long-press to forget it.");
+        overlay.addView(hint);
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        overlay.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        for (PairedDevice device : devices) {
+            Button entry = new Button(this);
+            entry.setText(device.name + "\n" + device.subtitle());
+            entry.setOnClickListener(v -> connectToSaved(root, overlay, device));
+            entry.setOnLongClickListener(v -> {
+                confirmForget(root, overlay, device);
+                return true;
+            });
+            list.addView(entry);
+        }
+
+        Button usbSetup = new Button(this);
+        usbSetup.setText("🔌 Add over USB");
+        usbSetup.setOnClickListener(v -> showUsbPairingHelp());
+        overlay.addView(usbSetup);
+
+        Button scanQrButton = new Button(this);
+        scanQrButton.setText("📷 Add by scanning QR");
+        scanQrButton.setOnClickListener(v ->
+                startActivityForResult(new Intent(this, QrScanActivity.class), REQUEST_SCAN_QR));
+        overlay.addView(scanQrButton);
+
+        Button findButton = new Button(this);
+        findButton.setText("📡 Find on this network");
+        findButton.setOnClickListener(v -> {
+            root.removeView(overlay);
+            showDiscoveryOverlay(root);
+        });
+        overlay.addView(findButton);
+
+        root.addView(overlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    private void connectToSaved(FrameLayout root, LinearLayout overlay, PairedDevice device) {
+        DeviceStore.touch(this, device);
+        completeConnectionSetup(root, java.util.Collections.singletonList(overlay),
+                device.host, device.port, device.token, device.pubkey);
+    }
+
+    private void confirmForget(FrameLayout root, LinearLayout overlay, PairedDevice device) {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Forget " + device.name + "?")
+                .setMessage("You will need to pair again to reconnect to it.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Forget", (d, w) -> {
+                    DeviceStore.remove(this, device);
+                    root.removeView(overlay);
+                    showDeviceListOverlay(root);
+                })
+                .show();
+    }
+
+    /**
+     * Explains the USB pairing step, which necessarily runs on the laptop.
+     *
+     * Being straight about the direction matters here: USB debugging is a
+     * protocol by which a computer inspects a phone, never the reverse, so
+     * this app cannot detect the laptop, scan for it, or initiate anything
+     * over the cable. What it *can* do is show whether the preconditions on
+     * this side are met and then react the moment the laptop pushes
+     * credentials across -- which is what the Devices list updating amounts
+     * to. Presenting that as the app "detecting" the laptop would be a
+     * comfortable lie that leaves the user with no idea what to fix when it
+     * does not work.
+     */
+    private void showUsbPairingHelp() {
+        boolean debuggingOn = UsbSetupStatus.isAdbEnabled(this);
+        boolean cablePlugged = UsbSetupStatus.isUsbConnected(this);
+
+        String message =
+                "On this phone\n"
+                + (debuggingOn ? "  ✓ USB debugging is ON\n" : "  ✗ USB debugging is OFF\n"
+                        + "     Settings → Developer options → USB debugging\n")
+                + (cablePlugged ? "  ✓ USB cable connected\n" : "  ✗ No USB cable detected\n")
+                + "\nThen, on your laptop\n"
+                + "  ./scripts/pair-usb.sh\n"
+                + "\nThe laptop does the detecting -- USB debugging only works in that "
+                + "direction. This screen updates by itself once it has sent the details "
+                + "across.";
+
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Add over USB")
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .setNeutralButton("Re-check", (d, w) -> showUsbPairingHelp())
+                .show();
     }
 
     // ------------------------------------------------------------ discovery
@@ -709,7 +911,12 @@ public class MainActivity extends Activity {
         port = p;
         token = t;
         pubkey = pk;
-        new ConnectionState(host, port, token, pubkey, currentMode).save(this);
+        // Every pairing path funnels through here, so this is the one
+        // place a device needs saving. Keyed on the host's public key, so
+        // re-pairing a laptop that changed networks updates it in place
+        // rather than leaving a stale duplicate -- see PairedDevice.
+        DeviceStore.upsert(this, new PairedDevice(
+                h, h, p, t, pk, System.currentTimeMillis()));
 
         for (View v : viewsToRemove) {
             root.removeView(v);

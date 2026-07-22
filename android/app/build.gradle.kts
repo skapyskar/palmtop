@@ -47,6 +47,14 @@ dependencies {
     // plausible number gets quoted.
     testImplementation("junit:junit:4.13.2")
 
+    // A real org.json for local unit tests. The org.json bundled in Android's
+    // framework is *stubbed* in the unit-test android.jar -- every method
+    // throws "not mocked" rather than doing anything -- so PairedDevice's
+    // serialisation could not otherwise be tested off-device at all. This is
+    // the same API, so nothing about the production code changes; it only
+    // gives the JVM tests a working implementation to run against.
+    testImplementation("org.json:json:20240303")
+
     // Signal's fork of the reference Noise Protocol Java implementation --
     // used for the transport encryption layer (see NoiseTransport.java).
     // Chosen over vendoring a raw jar specifically so it resolves normally
