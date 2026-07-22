@@ -163,3 +163,48 @@ fn write_qr_svg(code: &QrCode) -> Result<PathBuf> {
 
     Ok(path)
 }
+
+/// Re-checks this machine's address and re-issues the pairing info when it
+/// changes.
+///
+/// Without this, the address is resolved exactly once at startup and every
+/// advertisement of it -- the printed text, and critically the QR code a
+/// phone scans -- is frozen at whatever the laptop's address happened to be
+/// then. Laptops move networks constantly (docking, joining a hotspot,
+/// switching Wi-Fi), and after any of those the daemon carried on serving
+/// happily on 0.0.0.0 while telling every phone to dial an address it no
+/// longer had.
+///
+/// That failure is unusually nasty to diagnose from the phone, because
+/// dialling a stale private address does not fail fast: it is not on any
+/// network the phone can see, so Android routes it to the default gateway --
+/// mobile data -- where it is silently unroutable and simply times out.
+/// Reported from the field as "connects fine on my phone, no other phone
+/// works", since the phone that paired most recently is the only one holding
+/// an address that is still true.
+///
+/// Only runs when the address is auto-detected. A pinned `ip` in host.toml is
+/// an explicit instruction, and quietly overriding it would be worse than the
+/// staleness this avoids.
+pub fn watch_address(initial_ip: String, port: u16, token: String, pubkey: String) {
+    std::thread::spawn(move || {
+        let mut current = initial_ip;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let Ok(latest) = palmtop_config::detect_primary_ip() else { continue };
+            if latest == current {
+                continue;
+            }
+            println!(
+                "\n[net] this machine's address changed: {current} -> {latest}\n\
+                 [net] the previous QR code and pairing details are now wrong. Phones paired \
+                 against {current} will not reconnect until they pair again with the code below."
+            );
+            match render_connect_info(&latest, port, &token, &pubkey) {
+                Ok(info) => print!("{info}"),
+                Err(e) => eprintln!("[net] could not re-render the pairing info: {e:#}"),
+            }
+            current = latest;
+        }
+    });
+}

@@ -16,9 +16,11 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = "0.8"
 mdns-sd = "0.20"
 qrcode = "0.14"
-# Only for SO_SNDBUF: std::net::TcpStream exposes no way to size the kernel
-# send buffer, and that buffer is the one pipeline stage "never queue" was
-# not reaching -- see session::set_send_buffer.
-socket2 = "0.5"
+# std::net::TcpStream exposes neither SO_SNDBUF (the one pipeline stage
+# "never queue" was not reaching -- see session::set_send_buffer) nor TCP
+# keepalive (without which a phone that sleeps or loses Wi-Fi wedges a
+# session forever -- see session::configure_socket). The "all" feature is
+# what gates keepalive retry counts on Linux.
+socket2 = { version = "0.5", features = ["all"] }
 palmtop-config = { path = "../palmtop-config" }
 palmtop-proto = { path = "../palmtop-proto" }

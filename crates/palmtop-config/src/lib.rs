@@ -442,7 +442,11 @@ pub fn config_dir() -> Result<PathBuf> {
 
 /// Primary outbound IPv4 address, found by asking the routing table which
 /// source address it would use (no packets are actually sent).
-fn detect_primary_ip() -> Result<String> {
+///
+/// Public because it has to be re-asked periodically, not just at startup:
+/// laptops move between networks constantly and the address is only true
+/// until they do. See `palmtopd::pairing::watch_address`.
+pub fn detect_primary_ip() -> Result<String> {
     use std::net::UdpSocket;
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.connect("8.8.8.8:53")?;

@@ -61,6 +61,11 @@ jobs:
       - name: Build release APK
         working-directory: android
         env:
+          # Stamps the tag into versionName/versionCode -- see
+          # app/build.gradle.kts. Without it every release APK claims to be
+          # the same version, and "which build is this phone running?"
+          # becomes unanswerable exactly when it matters.
+          PALMTOP_VERSION: ${{ github.ref_name }}
           PALMTOP_KEYSTORE: ${{ steps.signing.outputs.keystore }}
           PALMTOP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           PALMTOP_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}

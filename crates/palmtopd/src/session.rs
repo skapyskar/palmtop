@@ -1,7 +1,14 @@
-//! TCP session handling: accepts one client at a time (matches the plan's
-//! MVP scope -- §9 "two phones connecting at once ... MVP: single"), performs
-//! the Noise handshake and pairing-token check, then wires capture -> encode
-//! -> network together and forwards incoming input events to the injector.
+//! TCP session handling: performs the Noise handshake and pairing-token
+//! check, then wires capture -> encode -> network together and forwards
+//! incoming input events to the injector.
+//!
+//! One client streams at a time (the plan's §9 "two phones at once ... MVP:
+//! single"), but connections are *accepted* concurrently and the newest
+//! authenticated client takes over. Enforcing "single" by simply not accepting
+//! was the earlier design and it was much worse than it sounds: a second phone
+//! completed its TCP handshake against the kernel's listen backlog, then sat
+//! unread forever -- no token check, no portal prompt, no error, nothing to
+//! see from either end. See `run` and `ActiveSession`.
 
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
@@ -174,23 +181,104 @@ fn stop_encode_stage(stage: EncodeStage, stage_stop: &AtomicBool) {
     let _ = stage.reader.join(); // stdout EOF once ffmpeg has gone
 }
 
+/// The session currently holding the screen, if any.
+struct ActiveSession {
+    stop: Arc<AtomicBool>,
+    /// A clone of the client's socket, kept for one purpose: shutting it down
+    /// during a takeover. Setting `stop` alone cannot free a thread parked in
+    /// a blocking read -- only closing the socket under it can, and without
+    /// that the outgoing session would linger until its peer happened to send
+    /// something, which a phone that has gone to sleep never will.
+    stream: TcpStream,
+}
+
+type SessionSlot = Arc<Mutex<Option<ActiveSession>>>;
+
+/// Clears the session registry on the way out, but only if the entry is still
+/// ours.
+///
+/// The identity check is the whole point. A session that has been taken over
+/// unblocks and unwinds *after* its replacement has already registered, so an
+/// unconditional clear would delete the new client's entry -- leaving the next
+/// client with nothing to take over from and two sessions fighting over the
+/// screen. Implemented as a guard so it holds on every exit path, including
+/// the `?` returns between here and the end of the session.
+struct ReleaseOnDrop {
+    active: SessionSlot,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        let mut slot = self.active.lock().unwrap();
+        if slot.as_ref().is_some_and(|s| Arc::ptr_eq(&s.stop, &self.stop)) {
+            *slot = None;
+        }
+    }
+}
+
+/// Detects a peer that has silently vanished.
+///
+/// Nothing else does. Every read on this socket is blocking and untimed, so a
+/// phone that disappears without closing the connection -- screen off, Wi-Fi
+/// dropped, app swiped away, walked out of range -- leaves the host parked in
+/// a read that will never return. With the single-session model below, that
+/// wedged session held the screen indefinitely and locked *every* device out,
+/// including the one that had been working a moment earlier. Roughly 30s to
+/// notice, which is far below the threshold where a person starts wondering
+/// whether the software is broken.
+fn configure_socket(stream: &TcpStream) {
+    stream.set_nodelay(true).ok();
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(15))
+        .with_interval(Duration::from_secs(5))
+        .with_retries(3);
+    if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        eprintln!("[net] could not enable TCP keepalive: {e} (a dead client may linger)");
+    }
+}
+
 pub fn run(
     cfg: HostConfig,
     render_node: String,
     input_tx: Sender<Message>,
-    rt: &tokio::runtime::Runtime,
+    rt: Arc<tokio::runtime::Runtime>,
 ) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.host.port))
         .with_context(|| format!("bind 0.0.0.0:{}", cfg.host.port))?;
     println!("[net] listening on 0.0.0.0:{}", cfg.host.port);
 
+    let cfg = Arc::new(cfg);
+    let render_node = Arc::new(render_node);
+    let active: SessionSlot = Arc::new(Mutex::new(None));
+
+    // One thread per connection, rather than servicing a client inline.
+    //
+    // Inline was a real and badly-presenting bug: while a session ran, this
+    // loop never called accept() again, so a second phone's connect() still
+    // succeeded (the kernel completes the handshake into the listen backlog
+    // by itself) while the host read nothing from it, checked no token, and
+    // never requested the screen-share portal. From that phone the app looked
+    // simply broken -- connected, then nothing, no error, no prompt, forever.
+    // Accepting promptly is what makes the refusal-or-takeover below possible
+    // at all: a connection nobody ever reads cannot be told anything.
     loop {
         let (stream, addr) = listener.accept()?;
         println!("[net] client connected: {addr}");
-        if let Err(e) = handle_client(stream, &cfg, &render_node, &input_tx, rt) {
-            eprintln!("[net] session ended: {e:#}");
-        }
-        println!("[net] ready for next client");
+        let (cfg, render_node, input_tx, rt, active) = (
+            cfg.clone(),
+            render_node.clone(),
+            input_tx.clone(),
+            rt.clone(),
+            active.clone(),
+        );
+        thread::spawn(move || {
+            if let Err(e) = handle_client(stream, &cfg, &render_node, &input_tx, &rt, &active) {
+                eprintln!("[net] session with {addr} ended: {e:#}");
+            } else {
+                println!("[net] session with {addr} ended");
+            }
+        });
     }
 }
 
@@ -200,8 +288,9 @@ fn handle_client(
     render_node: &str,
     input_tx: &Sender<Message>,
     rt: &tokio::runtime::Runtime,
+    active: &SessionSlot,
 ) -> Result<()> {
-    stream.set_nodelay(true).ok();
+    configure_socket(&stream);
 
     let private_key = noise::from_hex(&cfg.pairing.noise_private_key)
         .context("decode noise_private_key from config/host.toml")?;
@@ -210,6 +299,39 @@ fn handle_client(
     let noise: SharedNoise = Arc::new(Mutex::new(transport));
 
     let device_profile = handshake(&mut stream, &noise, &cfg.pairing.token)?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // Newest authenticated client wins.
+    //
+    // Ordering is the security-relevant part: this runs *after* the pairing
+    // token has been checked, so an unpaired device on the network cannot
+    // knock a legitimate session off the screen by merely opening a socket.
+    //
+    // Takeover rather than refusal because refusal fails in the case that
+    // actually happens. The usual reason a session is still held is that the
+    // previous one is already dead -- a phone that slept or lost Wi-Fi, whose
+    // socket nothing has noticed yet -- and telling a real user "another
+    // device is connected" when the other device is their own dormant phone
+    // gives them nothing to do about it. Switching phones deliberately is the
+    // same operation and works for free.
+    {
+        let mut slot = active.lock().unwrap();
+        if let Some(previous) = slot.take() {
+            println!("[net] a new client authenticated -- taking over the previous session");
+            previous.stop.store(true, Ordering::Relaxed);
+            // Unblocks the old session's threads immediately; see ActiveSession.
+            let _ = previous.stream.shutdown(std::net::Shutdown::Both);
+        }
+        *slot = Some(ActiveSession {
+            stop: stop.clone(),
+            stream: stream.try_clone().context("clone tcp stream for the session registry")?,
+        });
+    }
+
+    // Whatever happens below, this session must not leave a stale entry behind
+    // that a later client would try to shut down.
+    let _release = ReleaseOnDrop { active: active.clone(), stop: stop.clone() };
 
     // From here on, every failure is one the phone cannot otherwise see. The
     // laptop's operator has journalctl; the person holding the phone has a
@@ -253,7 +375,6 @@ fn handle_client(
     );
     println!("[net] streaming {width}x{height} to client");
 
-    let stop = Arc::new(AtomicBool::new(false));
     let slot = FrameSlot::new();
 
     let (out_tx, out_rx) = mpsc::channel::<Outgoing>();
@@ -618,5 +739,77 @@ fn run_writer(
             // "did a frame really reach the phone", not "did we produce one".
             sent_a_frame.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A connected socket, for tests that only need something `shutdown`-able
+    /// in the registry rather than a working session.
+    fn dummy_stream() -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        TcpStream::connect(addr).unwrap()
+    }
+
+    fn register(active: &SessionSlot, stop: Arc<AtomicBool>) {
+        *active.lock().unwrap() =
+            Some(ActiveSession { stop, stream: dummy_stream() });
+    }
+
+    #[test]
+    fn a_taken_over_session_does_not_clear_its_replacements_registration() {
+        // The ordering that makes this subtle: a session that has been taken
+        // over keeps running for a moment while it unwinds, and only *then*
+        // drops its guard -- by which point the new session has already
+        // registered. An unconditional clear here would silently deregister a
+        // live session, so the next client would find nothing to take over
+        // from and two sessions would end up fighting over the screen.
+        let active: SessionSlot = Arc::new(Mutex::new(None));
+
+        let old_stop = Arc::new(AtomicBool::new(false));
+        register(&active, old_stop.clone());
+        let old_guard = ReleaseOnDrop { active: active.clone(), stop: old_stop.clone() };
+
+        // A newly authenticated client takes over.
+        let new_stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = active.lock().unwrap();
+            let previous = slot.take().expect("a session was registered");
+            previous.stop.store(true, Ordering::Relaxed);
+            let _ = previous.stream.shutdown(std::net::Shutdown::Both);
+        }
+        register(&active, new_stop.clone());
+
+        assert!(old_stop.load(Ordering::Relaxed), "the old session should be told to stop");
+
+        // Only now does the displaced session finish unwinding.
+        drop(old_guard);
+
+        let slot = active.lock().unwrap();
+        let current = slot.as_ref().expect("the replacement must still be registered");
+        assert!(
+            Arc::ptr_eq(&current.stop, &new_stop),
+            "the displaced session cleared the wrong registration"
+        );
+    }
+
+    #[test]
+    fn a_session_that_was_never_displaced_clears_itself_on_exit() {
+        let active: SessionSlot = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        register(&active, stop.clone());
+
+        {
+            let _guard = ReleaseOnDrop { active: active.clone(), stop: stop.clone() };
+        }
+
+        assert!(
+            active.lock().unwrap().is_none(),
+            "a session must not leave a stale registration behind -- the next client \
+             would try to shut down a socket nobody is using"
+        );
     }
 }

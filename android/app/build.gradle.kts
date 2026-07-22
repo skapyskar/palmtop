@@ -10,8 +10,20 @@ android {
         applicationId = "dev.palmtop.client"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Taken from the release tag when CI builds one, so an installed APK
+        // can be identified. Every release so far reported "0.1.0"/1 no matter
+        // which release it came from, which made "is this phone running an old
+        // build?" -- the first question worth asking when one device
+        // misbehaves and another does not -- unanswerable from the phone.
+        val palmtopTag = (System.getenv("PALMTOP_VERSION") ?: "").removePrefix("v")
+        versionName = palmtopTag.ifEmpty { "0.0.0-dev" }
+        // Monotonic and derived from the tag: 0.2.2 -> 2002. Android refuses to
+        // install an APK whose versionCode is below the installed one, so this
+        // must never go backwards between releases.
+        versionCode = Regex("^(\\d+)\\.(\\d+)\\.(\\d+)").find(palmtopTag)?.destructured
+            ?.let { (major, minor, patch) ->
+                major.toInt() * 1_000_000 + minor.toInt() * 1_000 + patch.toInt()
+            } ?: 1
     }
 
     compileOptions {

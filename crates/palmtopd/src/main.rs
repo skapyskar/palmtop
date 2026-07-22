@@ -58,6 +58,17 @@ fn main() -> Result<()> {
         )?
     );
 
+    // Only meaningful when the address is auto-detected; a pinned one is an
+    // explicit instruction to leave alone. See watch_address.
+    if cfg.host.ip.trim().is_empty() {
+        pairing::watch_address(
+            host_ip.clone(),
+            cfg.host.port,
+            cfg.pairing.token.clone(),
+            cfg.pairing.noise_public_key.clone(),
+        );
+    }
+
     // Input injector lives for the daemon's lifetime, independent of any
     // particular client connection -- see input.rs.
     let (input_tx, input_rx) = mpsc::channel();
@@ -73,6 +84,6 @@ fn main() -> Result<()> {
     // fd has been extracted -- risks the portal treating our disconnect from
     // DBus as the client going away and tearing down the still-in-use
     // PipeWire stream. See session.rs for where this used to happen.
-    let rt = tokio::runtime::Runtime::new()?;
-    session::run(cfg, render_node, input_tx, &rt)
+    let rt = std::sync::Arc::new(tokio::runtime::Runtime::new()?);
+    session::run(cfg, render_node, input_tx, rt)
 }

@@ -1050,10 +1050,21 @@ public class MainActivity extends Activity {
         teardown();
         int myGeneration = ++generation;
         SessionLog.startSession();
+        SessionLog.info("app", "Palmtop " + appVersion() + ", protocol v" + Protocol.VERSION);
         SessionLog.info("net", "connecting to " + host + ":" + port);
         statusView.setTextColor(Color.GREEN);
         statusView.setText("connecting to " + host + ":" + port + " ...");
         new Thread(() -> runNetwork(surfaceHolder, myGeneration), "palmtop-net").start();
+    }
+
+    /** Version of this build, for the session log. Answering "are the two
+     *  sides the same version?" should not require anyone to guess. */
+    private String appVersion() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "unknown";
+        }
     }
 
     private void teardown() {
@@ -1281,7 +1292,18 @@ public class MainActivity extends Activity {
             socket = mySocket; // published so teardown() can close it from another thread
             mySocket.connect(new InetSocketAddress(host, port), 10000);
             mySocket.setTcpNoDelay(true);
-            Log.i(TAG, "connected to " + host + ":" + port);
+            // A connect timeout alone is not enough, and assuming it was hid a
+            // real bug for a while: connect() succeeds as soon as the kernel
+            // completes the TCP handshake, which it does whether or not the
+            // host ever reads the connection. A host that accepted us into its
+            // backlog and then never looked at us left this thread blocked in
+            // the Noise handshake read forever, showing "connecting..." with no
+            // error to act on. A read timeout is what turns that silence into a
+            // message. Generous, because the legitimate slow case -- waiting on
+            // a human to approve the screen-share dialog -- is covered by the
+            // host's Status messages resetting this clock.
+            mySocket.setSoTimeout(20000);
+            SessionLog.good("net", "TCP connected to " + host + ":" + port);
 
             // Deliberately NOT a BufferedInputStream: it would read ahead and
             // buffer bytes belonging to whichever phase (handshake vs. Noise
@@ -1324,6 +1346,16 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Log.e(TAG, "network thread failed", e);
             SessionLog.error("net", String.valueOf(e.getMessage() != null ? e.getMessage() : e));
+            // "failed to connect after 10000ms" is true and useless on its own.
+            // Far and away the most common cause is that the two devices are
+            // not on the same network -- or that the laptop's address has
+            // changed since pairing, which looks identical from here. Say which.
+            if (e instanceof java.net.SocketTimeoutException
+                    || e instanceof java.net.ConnectException
+                    || e instanceof java.net.NoRouteToHostException) {
+                String why = NetworkCheck.explainUnreachable(host);
+                if (why != null) SessionLog.error("net", why);
+            }
             if (generation == myGeneration) {
                 runOnUiThread(() -> {
                     statusView.setTextColor(Color.RED);
