@@ -159,7 +159,7 @@ fn handle_client(
         .context("noise handshake (responder)")?;
     let noise: SharedNoise = Arc::new(Mutex::new(transport));
 
-    handshake(&mut stream, &noise, &cfg.pairing.token)?;
+    let device_profile = handshake(&mut stream, &noise, &cfg.pairing.token)?;
 
     // Deliberately does NOT drop the runtime after this call (it used to, and
     // that was a bug -- see main.rs). The portal's DBus connection lives
@@ -189,7 +189,7 @@ fn handle_client(
     let (mode_tx, mode_rx) = mpsc::channel::<crate::modes::Mode>();
 
     let mut mode = crate::modes::Mode::default();
-    let mut preset = mode.preset();
+    let mut preset = mode.preset().clamped_to(&device_profile);
     set_send_buffer(&stream, preset.sndbuf_bytes);
 
     let mut stage_stop = Arc::new(AtomicBool::new(false));
@@ -240,7 +240,7 @@ fn handle_client(
                 stop_encode_stage(stage, &stage_stop);
 
                 mode = new_mode;
-                preset = mode.preset();
+                preset = mode.preset().clamped_to(&device_profile);
                 set_send_buffer(&stream, preset.sndbuf_bytes);
                 stage_stop = Arc::new(AtomicBool::new(false));
                 stage = start_encode_stage(
@@ -316,9 +316,15 @@ fn recv_encrypted(noise: &SharedNoise, stream: &mut TcpStream) -> Result<Option<
         .map(Some)
 }
 
-fn handshake(stream: &mut TcpStream, noise: &SharedNoise, expected_token: &str) -> Result<()> {
+/// Returns the connecting client's self-reported capabilities, which the
+/// caller uses to size the stream -- see `palmtop_proto::DeviceProfile`.
+fn handshake(
+    stream: &mut TcpStream,
+    noise: &SharedNoise,
+    expected_token: &str,
+) -> Result<palmtop_proto::DeviceProfile> {
     match recv_encrypted(noise, stream)? {
-        Some(Message::Hello { protocol_version, token }) => {
+        Some(Message::Hello { protocol_version, token, profile }) => {
             if protocol_version != PROTOCOL_VERSION {
                 let reason =
                     format!("protocol mismatch: host={PROTOCOL_VERSION} client={protocol_version}");
@@ -335,7 +341,13 @@ fn handshake(stream: &mut TcpStream, noise: &SharedNoise, expected_token: &str) 
                 bail!("{reason}");
             }
             send_encrypted(noise, stream, &Message::HelloAck { ok: true, reason: String::new() })?;
-            Ok(())
+            println!(
+                "[net] client: {} ({}x{} @{}Hz, decodes up to {}x{}@{}, low-latency decoder: {})",
+                profile.model, profile.screen_width, profile.screen_height, profile.refresh_hz,
+                profile.max_decode_width, profile.max_decode_height, profile.max_decode_fps,
+                profile.low_latency_decoder
+            );
+            Ok(profile)
         }
         other => bail!("expected Hello as the first message, got {other:?}"),
     }

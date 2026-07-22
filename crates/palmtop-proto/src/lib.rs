@@ -22,7 +22,10 @@ pub use noise::NoiseTransport;
 /// clock-offset probe every latency measurement depends on. `VideoFrame`
 /// carries the capture timestamp for end-to-end measurement, and `SetMode`
 /// selects a quality preset.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// v4: `Hello` carries a [`DeviceProfile`], so the host tunes the stream to
+/// whatever phone actually connected instead of relying on hand-written
+/// per-device config that could never ship to strangers.
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Cap on a single message payload. Generous for 4K video frames, small enough
 /// to reject clearly-corrupt length headers instead of trying to allocate them.
@@ -82,12 +85,76 @@ impl std::ops::BitOr for Modifiers {
     }
 }
 
+/// What the client tells the host about itself, so the host can tune the
+/// stream to hardware it has never seen.
+///
+/// This exists to delete a scaling problem, not merely as a convenience.
+/// These values previously lived in hand-written `config/devices/*.toml`
+/// files, populated by running `scripts/probe-device.sh` over ADB against
+/// each phone -- workable for one developer with one phone on the desk, and
+/// completely unshippable to strangers, who have neither the script nor any
+/// reason to run it. The client already knows every one of these facts about
+/// itself; having it simply say so at connect time removes the manual step
+/// entirely, and means an unknown phone is configured correctly on its first
+/// connection with nothing to edit.
+///
+/// Treated as a hint, never as a command: the host clamps its own presets
+/// against these numbers but is not obliged to believe anything that would
+/// produce a nonsensical stream (see `palmtopd::modes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceProfile {
+    /// Human-readable, for logs and the host's paired-device list.
+    pub model: String,
+    /// Native screen size in pixels, as the device reports it.
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub density_dpi: u32,
+    /// Rounded to whole Hz -- the fractional part (a panel reporting
+    /// 60.000004) has never mattered for any decision made from it.
+    pub refresh_hz: u32,
+    /// Largest frame the chosen hardware decoder claims it can handle, and
+    /// the frame rate it claims at that size. The host will not send more
+    /// than this, because exceeding a decoder's real capacity raises latency
+    /// while throughput still looks fine -- measured in Phase 0, where
+    /// 1080p60 came out *worse* end-to-end than 1080p30 on this class of
+    /// hardware.
+    pub max_decode_width: u32,
+    pub max_decode_height: u32,
+    pub max_decode_fps: u32,
+    /// Whether a genuine low-latency decoder was found, as opposed to
+    /// falling back to a general-purpose one.
+    pub low_latency_decoder: bool,
+}
+
+impl DeviceProfile {
+    /// A deliberately conservative stand-in used when a client says nothing
+    /// useful about itself. Every value is one that virtually any Android
+    /// device meeting this project's minimum can handle, so an unknown or
+    /// malfunctioning client degrades to a working stream rather than to a
+    /// broken one.
+    pub fn conservative_default() -> Self {
+        DeviceProfile {
+            model: "unknown".to_string(),
+            screen_width: 1280,
+            screen_height: 720,
+            density_dpi: 320,
+            refresh_hz: 60,
+            max_decode_width: 1280,
+            max_decode_height: 720,
+            max_decode_fps: 30,
+            low_latency_decoder: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Client -> host, first message on the connection. `token` is the
     /// pairing secret from the host's QR code (see palmtopd/src/pairing.rs);
     /// an empty/wrong token is rejected the same as a version mismatch.
-    Hello { protocol_version: u16, token: String },
+    /// `profile` lets the host size the stream to this specific phone -- see
+    /// [`DeviceProfile`].
+    Hello { protocol_version: u16, token: String, profile: DeviceProfile },
     /// Host -> client, response to `Hello`. `ok=false` means version
     /// mismatch *or* pairing rejection; the connection should be closed
     /// after reading the reason.
@@ -182,9 +249,22 @@ impl Message {
     pub fn write_to<W: Write>(&self, w: &mut W) -> Result<()> {
         let mut payload = Vec::new();
         let tag = match self {
-            Message::Hello { protocol_version, token } => {
+            Message::Hello { protocol_version, token, profile } => {
                 payload.extend_from_slice(&protocol_version.to_be_bytes());
                 write_str(&mut payload, token);
+                write_str(&mut payload, &profile.model);
+                for v in [
+                    profile.screen_width,
+                    profile.screen_height,
+                    profile.density_dpi,
+                    profile.refresh_hz,
+                    profile.max_decode_width,
+                    profile.max_decode_height,
+                    profile.max_decode_fps,
+                ] {
+                    payload.extend_from_slice(&v.to_be_bytes());
+                }
+                payload.push(profile.low_latency_decoder as u8);
                 Tag::Hello
             }
             Message::HelloAck { ok, reason } => {
@@ -285,7 +365,18 @@ impl Message {
             t if t == Tag::Hello as u8 => {
                 let protocol_version = read_u16(&mut p)?;
                 let token = read_str(&mut p)?;
-                Message::Hello { protocol_version, token }
+                let profile = DeviceProfile {
+                    model: read_str(&mut p)?,
+                    screen_width: read_u32(&mut p)?,
+                    screen_height: read_u32(&mut p)?,
+                    density_dpi: read_u32(&mut p)?,
+                    refresh_hz: read_u32(&mut p)?,
+                    max_decode_width: read_u32(&mut p)?,
+                    max_decode_height: read_u32(&mut p)?,
+                    max_decode_fps: read_u32(&mut p)?,
+                    low_latency_decoder: read_u8(&mut p)? != 0,
+                };
+                Message::Hello { protocol_version, token, profile }
             }
             t if t == Tag::HelloAck as u8 => {
                 let ok = read_u8(&mut p)? != 0;
@@ -413,11 +504,47 @@ mod tests {
     #[test]
     fn hello_roundtrips() {
         let token = "deadbeef".to_string();
-        match roundtrip(Message::Hello { protocol_version: PROTOCOL_VERSION, token: token.clone() }) {
-            Message::Hello { protocol_version, token: t } => {
+        // Deliberately not the conservative default -- distinct values in
+        // every field so a serialisation bug that transposed two of them
+        // (easy to do with seven consecutive u32s) cannot pass unnoticed.
+        let profile = DeviceProfile {
+            model: "Pixel 9 Pro".to_string(),
+            screen_width: 1280,
+            screen_height: 2856,
+            density_dpi: 495,
+            refresh_hz: 120,
+            max_decode_width: 3840,
+            max_decode_height: 2160,
+            max_decode_fps: 60,
+            low_latency_decoder: true,
+        };
+        match roundtrip(Message::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            token: token.clone(),
+            profile: profile.clone(),
+        }) {
+            Message::Hello { protocol_version, token: t, profile: p } => {
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(t, token);
+                assert_eq!(p, profile);
             }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_roundtrips_a_profile_with_a_unicode_model_name() {
+        // Device model strings are vendor-supplied and are not guaranteed
+        // ASCII; a length-prefixed byte count (not a char count) is what
+        // makes this work, so it is worth pinning.
+        let mut profile = DeviceProfile::conservative_default();
+        profile.model = "小米 14 Ultra".to_string();
+        match roundtrip(Message::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            token: String::new(),
+            profile: profile.clone(),
+        }) {
+            Message::Hello { profile: p, .. } => assert_eq!(p, profile),
             other => panic!("wrong variant: {other:?}"),
         }
     }
@@ -516,8 +643,12 @@ mod tests {
         }
     }
 
+    /// Pins the wire version so bumping it is always a deliberate act --
+    /// the host and client compare this exact number during the
+    /// handshake, and a silent bump on one side only would present as an
+    /// unexplained connection refusal.
     #[test]
-    fn protocol_version_is_three() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+    fn protocol_version_is_four() {
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 }

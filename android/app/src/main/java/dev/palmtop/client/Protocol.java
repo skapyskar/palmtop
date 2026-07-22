@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -18,7 +18,7 @@ public final class Protocol {
      *  defined but never actually sent), VideoFrame carries capture_us for
      *  end-to-end latency measurement, and SetMode selects a quality preset.
      *  Must equal palmtop-proto's PROTOCOL_VERSION or the handshake fails. */
-    public static final int VERSION = 3;
+    public static final int VERSION = 4;
     private static final int MAX_PAYLOAD = 16 * 1024 * 1024;
 
     public static final int TAG_HELLO = 1;
@@ -48,10 +48,28 @@ public final class Protocol {
 
     // ---- outgoing (client -> host); each returns a fully-framed message ----
 
-    public static byte[] hello(String token) {
+    /**
+     * @param profile what this device can actually handle -- the host
+     *     sizes the stream from it, replacing the hand-written per-device
+     *     config that could never ship to strangers. Field order here is
+     *     load-bearing: it must match palmtop-proto's reader exactly, and
+     *     seven consecutive ints make a transposition easy to introduce
+     *     and invisible at runtime (the stream would simply be sized
+     *     oddly). The Rust round-trip test pins the same order.
+     */
+    public static byte[] hello(String token, DeviceProfile profile) {
         return frame(TAG_HELLO, p -> {
             p.writeShort(VERSION);
             writeString(p, token);
+            writeString(p, profile.model);
+            p.writeInt(profile.screenWidth);
+            p.writeInt(profile.screenHeight);
+            p.writeInt(profile.densityDpi);
+            p.writeInt(profile.refreshHz);
+            p.writeInt(profile.maxDecodeWidth);
+            p.writeInt(profile.maxDecodeHeight);
+            p.writeInt(profile.maxDecodeFps);
+            p.writeByte(profile.lowLatencyDecoder ? 1 : 0);
         });
     }
 

@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 import android.app.Activity;
 import android.content.Intent;
@@ -168,12 +168,23 @@ public class MainActivity extends Activity {
     private static final long PING_BURST_INTERVAL_US = 200_000;
     private static final long PING_STEADY_INTERVAL_US = 1_000_000;
 
+    /** This device's capabilities, sent to the host at handshake so it can
+     *  size the stream correctly. Detected once and reused: these are
+     *  fixed hardware facts, and re-querying the codec list on every
+     *  reconnect would cost time in exactly the latency-sensitive path
+     *  this project spends its effort protecting. */
+    private volatile DeviceProfile deviceProfile;
+
     private static long nowUs() { return System.nanoTime() / 1000L; }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // Measured once here rather than per-connection: fixed hardware
+        // facts, and the codec-capability query is not free.
+        deviceProfile = DeviceProfile.detect(this, MIME);
 
         // ConnectionState prefers the launching Intent's extras, falling back
         // to whatever was last persisted -- see its class doc comment for why
@@ -1012,7 +1023,15 @@ public class MainActivity extends Activity {
         noise = NoiseTransport.handshakeInitiator(rawIn, rawOut, hostPubKey);
         Log.i(TAG, "noise handshake ok");
 
-        sendEncrypted(rawOut, Protocol.hello(token));
+        DeviceProfile profile = deviceProfile;
+        if (profile == null) {
+            // Should not happen (onCreate detects it), but a null here
+            // would abort the connection entirely -- degrading to the
+            // conservative profile costs some quality and keeps the
+            // session working, which is the better failure.
+            profile = DeviceProfile.fallback();
+        }
+        sendEncrypted(rawOut, Protocol.hello(token, profile));
         Protocol.Received ack = recvEncrypted(rawIn);
         if (ack == null || ack.tag != Protocol.TAG_HELLO_ACK || !ack.ok) {
             String reason = ack != null ? ack.reason : "connection closed during handshake";

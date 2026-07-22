@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 import java.util.HashMap;
 import java.util.Map;

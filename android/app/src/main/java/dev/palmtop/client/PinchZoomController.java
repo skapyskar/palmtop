@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 import android.view.MotionEvent;
 import android.view.View;

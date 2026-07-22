@@ -35,6 +35,11 @@ fn main() -> Result<()> {
     send(&mut transport, &mut stream, &Message::Hello {
         protocol_version: PROTOCOL_VERSION,
         token: cfg.pairing.token.clone(),
+        // This harness is not a phone and has no display of its own, so
+        // it reports the conservative default rather than inventing
+        // capabilities -- the host then treats it like a modest device,
+        // which is exactly the right behaviour for a test client.
+        profile: palmtop_proto::DeviceProfile::conservative_default(),
     })?;
     match recv(&mut transport, &mut stream)?.context("connection closed during handshake")? {
         Message::HelloAck { ok: true, .. } => println!("[test-client] handshake ok"),

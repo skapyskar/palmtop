@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.palmtop.spike"
+    namespace = "dev.palmtop.client"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.palmtop.spike"
+        applicationId = "dev.palmtop.client"
         minSdk = 30
         targetSdk = 36
         versionCode = 1

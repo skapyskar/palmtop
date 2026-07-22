@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;

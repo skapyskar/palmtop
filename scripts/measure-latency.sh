@@ -26,7 +26,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_ROOT/scripts/device.sh"
 
-PKG="dev.palmtop.spike"
+PKG="dev.palmtop.client"
 DURATION=30
 CONTENT=""
 MODES="sync,balanced,quality,battery"

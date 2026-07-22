@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 /**
  * Quality-preset identifiers shared between the UI (mode picker, HUD) and

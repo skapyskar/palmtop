@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 /**
  * Computes the largest rectangle that fits inside an available area while

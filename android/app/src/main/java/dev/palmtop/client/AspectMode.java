@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 /**
  * Client-local display presets for how the video is cropped/fit on screen.

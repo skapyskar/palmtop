@@ -1,4 +1,4 @@
-package dev.palmtop.spike;
+package dev.palmtop.client;
 
 /**
  * Pure scale/pan bookkeeping for the 3-finger zoom gesture -- deliberately

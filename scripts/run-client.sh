@@ -32,10 +32,10 @@ echo "[..] building + installing client (Gradle -- see android/, not android-spi
 adb -s "$DEVICE_SERIAL" install -r "$REPO_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" \
   2>&1 | grep -E "Success|Failure"
 
-adb -s "$DEVICE_SERIAL" shell am force-stop dev.palmtop.spike
+adb -s "$DEVICE_SERIAL" shell am force-stop dev.palmtop.client
 adb -s "$DEVICE_SERIAL" shell input keyevent KEYCODE_WAKEUP
 sleep 1
-adb -s "$DEVICE_SERIAL" shell am start -n dev.palmtop.spike/.MainActivity \
+adb -s "$DEVICE_SERIAL" shell am start -n dev.palmtop.client/.MainActivity \
   --es host "$HOST_IP" --ei port "$HOST_PORT" \
   --es token "$PAIRING_TOKEN" --es pubkey "$PAIRING_PUBKEY"
 
