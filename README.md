@@ -166,7 +166,10 @@ block a device from reaching it. This is the single most common cause.
 **The screen-share prompt never appears / the phone connects but the screen
 stays black.**
 Run the built-in check on the laptop first — it tests the real portal and
-really encodes through your GPU, and names the exact fix for anything broken:
+really encodes through your GPU, and names the exact fix for anything broken.
+It tries VA-API, NVENC and software encoding and reports which ones actually
+work on this machine, not just whether the hardware for one is nominally
+present — any single one working is enough:
 
 ```
 palmtopd --doctor

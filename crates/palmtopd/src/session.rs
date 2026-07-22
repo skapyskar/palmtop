@@ -140,7 +140,7 @@ struct EncodeStage {
 /// checked against the signature every time.
 struct StageContext<'a> {
     cfg: &'a HostConfig,
-    render_node: &'a str,
+    backend: &'a palmtop_config::EncodeBackend,
     src_width: u32,
     src_height: u32,
     slot: Arc<FrameSlot>,
@@ -154,7 +154,7 @@ fn start_encode_stage(
 ) -> Result<EncodeStage> {
     let (slot, latest_encoded) = (ctx.slot.clone(), ctx.latest_encoded.clone());
     let mut child =
-        encode::spawn(ctx.cfg, ctx.render_node, preset, ctx.src_width, ctx.src_height)?;
+        encode::spawn(ctx.cfg, ctx.backend, preset, ctx.src_width, ctx.src_height)?;
     let ffmpeg_stdin = child.stdin.take().context("ffmpeg stdin")?;
     let ffmpeg_stdout = child.stdout.take().context("ffmpeg stdout")?;
 
@@ -240,7 +240,7 @@ fn configure_socket(stream: &TcpStream) {
 
 pub fn run(
     cfg: HostConfig,
-    render_node: String,
+    backend: palmtop_config::EncodeBackend,
     input_tx: Sender<Message>,
     rt: Arc<tokio::runtime::Runtime>,
 ) -> Result<()> {
@@ -249,7 +249,7 @@ pub fn run(
     println!("[net] listening on 0.0.0.0:{}", cfg.host.port);
 
     let cfg = Arc::new(cfg);
-    let render_node = Arc::new(render_node);
+    let backend = Arc::new(backend);
     let active: SessionSlot = Arc::new(Mutex::new(None));
 
     // One thread per connection, rather than servicing a client inline.
@@ -265,15 +265,15 @@ pub fn run(
     loop {
         let (stream, addr) = listener.accept()?;
         println!("[net] client connected: {addr}");
-        let (cfg, render_node, input_tx, rt, active) = (
+        let (cfg, backend, input_tx, rt, active) = (
             cfg.clone(),
-            render_node.clone(),
+            backend.clone(),
             input_tx.clone(),
             rt.clone(),
             active.clone(),
         );
         thread::spawn(move || {
-            if let Err(e) = handle_client(stream, &cfg, &render_node, &input_tx, &rt, &active) {
+            if let Err(e) = handle_client(stream, &cfg, &backend, &input_tx, &rt, &active) {
                 eprintln!("[net] session with {addr} ended: {e:#}");
             } else {
                 println!("[net] session with {addr} ended");
@@ -285,7 +285,7 @@ pub fn run(
 fn handle_client(
     mut stream: TcpStream,
     cfg: &HostConfig,
-    render_node: &str,
+    backend: &palmtop_config::EncodeBackend,
     input_tx: &Sender<Message>,
     rt: &tokio::runtime::Runtime,
     active: &SessionSlot,
@@ -409,7 +409,7 @@ fn handle_client(
 
     let ctx = StageContext {
         cfg,
-        render_node,
+        backend,
         src_width: width,
         src_height: height,
         slot: slot.clone(),
@@ -502,7 +502,7 @@ fn handle_client(
         ok: true,
         detail: format!(
             "encoding {}x{}@{} on {} ({} mode)",
-            preset.width, preset.height, preset.fps, render_node, mode.name()
+            preset.width, preset.height, preset.fps, backend, mode.name()
         ),
     });
 

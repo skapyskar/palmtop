@@ -193,44 +193,183 @@ impl HostConfig {
     /// capture pipeline keeps running, and the phone sits on a blank screen
     /// forever with no error at either end. Probing turns that into either a
     /// working stream or a loud, specific message.
+    ///
+    /// Kept as its own method (rather than folded entirely into
+    /// `resolved_encode_backend`) because it is also what `--doctor` calls to
+    /// report on VA-API specifically, and because it bails loudly on failure,
+    /// which is right for a direct diagnostic but wrong for
+    /// `resolved_encode_backend`'s "fall through to the next backend" needs --
+    /// see `working_vaapi_node`, which the two share.
     pub fn resolved_render_node(&self) -> Result<String> {
-        let configured = self.gpu.vaapi_render_node.trim();
-        if !configured.is_empty() && node_can_encode(configured, &self.encode.codec) {
-            return Ok(configured.to_string());
-        }
-
-        let candidates = render_nodes();
-        let working: Vec<String> = candidates
-            .iter()
-            .filter(|n| node_can_encode(n, &self.encode.codec))
-            .cloned()
-            .collect();
-
-        match working.first() {
-            Some(node) => {
-                if configured.is_empty() {
-                    eprintln!("[gpu] auto-detected render node: {node}");
-                } else {
-                    eprintln!(
-                        "[gpu] configured render node {configured} cannot encode {} -- using {node} \
-                         instead. Set `vaapi_render_node = \"{node}\"` in host.toml to silence this.",
-                        self.encode.codec
-                    );
-                }
-                Ok(node.clone())
-            }
-            None if candidates.is_empty() => bail!(
+        match working_vaapi_node(&self.gpu.vaapi_render_node, &self.encode.codec) {
+            Some(node) => Ok(node),
+            None if render_nodes().is_empty() => bail!(
                 "no DRM render nodes found under /dev/dri -- this machine has no GPU available \
                  for hardware encode. Run `palmtopd --doctor` for details."
             ),
             None => bail!(
                 "none of the available render nodes ({}) can hardware-encode {}. Run \
                  `palmtopd --doctor` for the full diagnosis and how to fix it.",
-                candidates.join(", "),
+                render_nodes().join(", "),
                 self.encode.codec
             ),
         }
     }
+
+    /// The encoder to actually run: VA-API if any GPU node can do it, else
+    /// NVENC, else software x264 -- whichever this specific machine can
+    /// really do, established the same way as the render node is (by
+    /// encoding through it), not by guessing from what hardware is nominally
+    /// present.
+    ///
+    /// A machine with no usable VA-API node is not necessarily a machine that
+    /// cannot run Palmtop at all: NVIDIA GPUs frequently expose NVENC without
+    /// a usable VA-API path (the open NVIDIA VA-API shim is inconsistently
+    /// packaged), and even a machine with no GPU encoder at all can still
+    /// encode in software -- slower, and a real CPU cost, but a working
+    /// stream beats `--doctor` printing "will not work on this machine" for
+    /// someone who would have been fine with the software path.
+    ///
+    /// `encode.codec` in host.toml can pin one of these explicitly
+    /// (`h264_nvenc`, `libx264`); anything else (including the template's
+    /// default `h264_vaapi`) means "figure it out", in the same
+    /// narrow-not-widen spirit as `resolved_render_node`.
+    pub fn resolved_encode_backend(&self) -> Result<EncodeBackend> {
+        let configured = self.encode.codec.trim();
+
+        if configured == EncodeBackend::Nvenc.codec_name() {
+            if nvenc_encodes() {
+                return Ok(EncodeBackend::Nvenc);
+            }
+            eprintln!(
+                "[gpu] configured codec {configured} does not work on this machine -- \
+                 falling back to auto-detection."
+            );
+        } else if configured == EncodeBackend::Software.codec_name() {
+            if software_encodes() {
+                return Ok(EncodeBackend::Software);
+            }
+            eprintln!(
+                "[gpu] configured codec {configured} does not work on this machine (is ffmpeg \
+                 built with libx264?) -- falling back to auto-detection."
+            );
+        }
+        // Anything else, including the unconfigured default (h264_vaapi), is
+        // "figure it out": try VA-API first since it is the cheapest on
+        // power and CPU when it works, matching resolved_render_node's own
+        // priority.
+        if let Some(node) = working_vaapi_node(&self.gpu.vaapi_render_node, "h264_vaapi") {
+            return Ok(EncodeBackend::Vaapi { render_node: node });
+        }
+        if nvenc_encodes() {
+            eprintln!("[gpu] no VA-API render node can encode -- using NVENC instead.");
+            return Ok(EncodeBackend::Nvenc);
+        }
+        if software_encodes() {
+            eprintln!(
+                "[gpu] no hardware encoder (VA-API or NVENC) is available -- falling back to \
+                 software encoding. This costs real CPU and may not sustain the target \
+                 framerate at high resolutions; run `palmtopd --doctor` for the full picture."
+            );
+            return Ok(EncodeBackend::Software);
+        }
+        bail!(
+            "no working video encoder found on this machine -- tried VA-API, NVENC, and \
+             software (libx264) encoding. Run `palmtopd --doctor` for the full diagnosis."
+        );
+    }
+}
+
+/// Which real encoder this machine will run through, and what `encode::spawn`
+/// needs to know to build the right ffmpeg invocation for it. See
+/// `HostConfig::resolved_encode_backend`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeBackend {
+    Vaapi { render_node: String },
+    Nvenc,
+    Software,
+}
+
+impl EncodeBackend {
+    pub fn codec_name(&self) -> &'static str {
+        match self {
+            EncodeBackend::Vaapi { .. } => "h264_vaapi",
+            EncodeBackend::Nvenc => "h264_nvenc",
+            EncodeBackend::Software => "libx264",
+        }
+    }
+}
+
+impl std::fmt::Display for EncodeBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EncodeBackend::Vaapi { render_node } => write!(f, "VA-API on {render_node}"),
+            EncodeBackend::Nvenc => write!(f, "NVENC"),
+            EncodeBackend::Software => write!(f, "software (libx264)"),
+        }
+    }
+}
+
+/// The configured VA-API node if it can really encode `codec`, else the first
+/// available node that can, else `None`. Shared by `resolved_render_node`
+/// (which turns `None` into a specific bail) and `resolved_encode_backend`
+/// (which turns it into "try the next backend").
+fn working_vaapi_node(configured: &str, codec: &str) -> Option<String> {
+    let configured = configured.trim();
+    if !configured.is_empty() && node_can_encode(configured, codec) {
+        return Some(configured.to_string());
+    }
+    let node = render_nodes().into_iter().find(|n| node_can_encode(n, codec));
+    if let Some(node) = &node {
+        if configured.is_empty() {
+            eprintln!("[gpu] auto-detected render node: {node}");
+        } else {
+            eprintln!(
+                "[gpu] configured render node {configured} cannot encode {codec} -- using \
+                 {node} instead. Set `vaapi_render_node = \"{node}\"` in host.toml to silence \
+                 this."
+            );
+        }
+    }
+    node
+}
+
+/// Encodes a few generated frames through NVENC and reports whether ffmpeg
+/// succeeded -- the same "prove it by doing it" approach as `node_can_encode`,
+/// for the same reason: NVENC support depends on the installed driver and
+/// ffmpeg build in ways that are not worth trying to infer from `lspci`.
+pub fn nvenc_encodes() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
+            "-c:v", "h264_nvenc",
+            "-f", "null", "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Same, for software libx264. Almost always succeeds if ffmpeg has libx264
+/// compiled in at all, but "almost always" is exactly the gap a real probe
+/// closes and a version check does not -- some distributions ship an ffmpeg
+/// built without it for licensing reasons.
+pub fn software_encodes() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-f", "null", "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Every DRM render node on this machine, sorted for a stable preference order.

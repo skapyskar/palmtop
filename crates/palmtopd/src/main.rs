@@ -36,8 +36,8 @@ fn main() -> Result<()> {
     // milliseconds, and finding out the GPU cannot encode is something the
     // operator should learn from the daemon's own startup log, not from a
     // phone that connects to a blank screen ten minutes later.
-    let render_node = cfg.resolved_render_node()?;
-    println!("[gpu] encoding on {render_node}");
+    let backend = cfg.resolved_encode_backend()?;
+    println!("[gpu] encoding via {backend}");
 
     // Kept alive for the daemon's lifetime -- dropping it withdraws the
     // mDNS registration.
@@ -85,5 +85,5 @@ fn main() -> Result<()> {
     // DBus as the client going away and tearing down the still-in-use
     // PipeWire stream. See session.rs for where this used to happen.
     let rt = std::sync::Arc::new(tokio::runtime::Runtime::new()?);
-    session::run(cfg, render_node, input_tx, rt)
+    session::run(cfg, backend, input_tx, rt)
 }

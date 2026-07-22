@@ -1,4 +1,6 @@
-//! Continuous VA-API H.264 encode via a persistent `ffmpeg` subprocess.
+//! Continuous H.264 encode via a persistent `ffmpeg` subprocess, on whichever
+//! of VA-API / NVENC / software libx264 `HostConfig::resolved_encode_backend`
+//! found actually works on this machine -- see `spawn`.
 //!
 //! The Phase 0 encode spike (`spike-capture-encode`) proved VA-API throughput
 //! (120fps on real frames) by batching N frames to a file and running ffmpeg
@@ -104,19 +106,26 @@ impl TimestampFifo {
 /// radio. VBR idles cheaply and only spends when the picture demands it.
 ///
 /// `src_width`/`src_height` are the compositor's real output size; a preset may
-/// ask for something smaller, in which case VA-API scales on the GPU.
+/// ask for something smaller, in which case the encoder scales it down --
+/// on the GPU for VA-API/NVENC, in software (an extra `-vf scale`) for the
+/// software backend, which has no GPU to hand that work to.
+///
+/// The rate-control and GOP parameters (VBR target/cap/VBV window, `-bf 0`,
+/// keyframe interval) are shared across all three backends -- the reasoning
+/// above for *why* those specific numbers is backend-agnostic, only the
+/// flag names differ (VA-API's `-rc_mode`, NVENC's `-rc`, libx264's implicit
+/// ABR-from-bitrate). What's backend-specific is confined to
+/// `hwaccel_args`/`filter_and_scale`/`rate_control_args` below, so the
+/// shared reasoning stays in one place rather than being copied three times
+/// with room for the copies to drift.
 pub fn spawn(
     cfg: &palmtop_config::HostConfig,
-    render_node: &str,
+    backend: &palmtop_config::EncodeBackend,
     preset: &crate::modes::Preset,
     src_width: u32,
     src_height: u32,
 ) -> Result<Child> {
-    let scale = if preset.width != src_width || preset.height != src_height {
-        format!(",scale_vaapi={}:{}", preset.width, preset.height)
-    } else {
-        String::new()
-    };
+    let scaling = preset.width != src_width || preset.height != src_height;
     // The steady-state target sits at half the ceiling, leaving headroom for
     // bursts without making that burst rate the normal spend.
     let target_kbps = (preset.maxrate_kbps / 2).max(1);
@@ -125,33 +134,118 @@ pub fn spawn(
     // a single frame and reintroduce exactly the problem this replaced.
     let bufsize_kbit = (preset.maxrate_kbps / 10).max(1);
 
-    Command::new("ffmpeg")
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-init_hw_device"])
-        .arg(format!("vaapi=va:{render_node}"))
-        .args(["-f", "rawvideo", "-pix_fmt", "bgra", "-s"])
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+
+    for arg in hwaccel_args(backend) {
+        cmd.arg(arg);
+    }
+
+    cmd.args(["-f", "rawvideo", "-pix_fmt", "bgra", "-s"])
         .arg(format!("{src_width}x{src_height}"))
         .args(["-r", &preset.fps.to_string(), "-i", "pipe:0"])
         .arg("-vf")
-        .arg(format!("format=nv12,hwupload{scale}"))
-        .args(["-c:v", &cfg.encode.codec])
-        .args(["-rc_mode", "VBR"])
-        .args(["-b:v", &format!("{target_kbps}k")])
-        .args(["-maxrate", &format!("{}k", preset.maxrate_kbps)])
-        .args(["-bufsize", &format!("{bufsize_kbit}k")])
-        .args(["-bf", "0"])
+        .arg(filter_and_scale(backend, scaling, preset.width, preset.height))
+        .args(["-c:v", backend.codec_name()]);
+
+    for arg in rate_control_args(backend, target_kbps, preset.maxrate_kbps, bufsize_kbit) {
+        cmd.arg(arg);
+    }
+
+    cmd.args(["-bf", "0"])
         // Keyframe interval. A dropped P-frame corrupts decode until the next
         // keyframe resyncs, so a tight GOP bounds that glitch window; the
         // slower presets relax it because it costs real bitrate.
-        .args(["-g", &preset.gop.to_string()])
-        // Frame-pipelining depth -- see EncodeSection::async_depth doc comment.
-        // Low by design: this is an interactive control loop, not a video export.
-        .args(["-async_depth", &cfg.encode.async_depth.to_string()])
-        .args(["-f", "h264", "pipe:1"])
+        .args(["-g", &preset.gop.to_string()]);
+
+    if matches!(backend, palmtop_config::EncodeBackend::Vaapi { .. }) {
+        // Frame-pipelining depth -- see EncodeSection::async_depth doc
+        // comment. VA-API-specific: NVENC and libx264 have no equivalent
+        // flag and default to behaviour already low-latency enough for this
+        // use case without it.
+        cmd.args(["-async_depth", &cfg.encode.async_depth.to_string()]);
+    }
+
+    cmd.args(["-f", "h264", "pipe:1"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .context("spawn ffmpeg (is it on PATH? is the vaapi render node correct?)")
+        .with_context(|| format!("spawn ffmpeg for {backend} (is ffmpeg on PATH?)"))
+}
+
+/// Arguments that must appear *before* `-i`: hardware device init for
+/// VA-API, nothing for NVENC/software (ffmpeg's nvenc/libx264 encoders take
+/// plain frames directly -- no device handle to set up first).
+fn hwaccel_args(backend: &palmtop_config::EncodeBackend) -> Vec<String> {
+    match backend {
+        palmtop_config::EncodeBackend::Vaapi { render_node } => {
+            vec!["-init_hw_device".to_string(), format!("vaapi=va:{render_node}")]
+        }
+        palmtop_config::EncodeBackend::Nvenc | palmtop_config::EncodeBackend::Software => vec![],
+    }
+}
+
+/// The `-vf` value: pixel format conversion plus scaling, if the preset
+/// asked for a size other than the capture's native one.
+///
+/// VA-API scales on the GPU as part of the same `hwupload` filter chain
+/// (`scale_vaapi`), which is why it needs `format=nv12,hwupload` first --
+/// the frame has to be GPU-resident before a GPU filter can touch it. NVENC
+/// and software have no such requirement (plain filters, plain scale) but
+/// pay for that simplicity in an extra CPU-side scale pass -- an acceptable
+/// cost given both are already fallback paths, not the common case.
+fn filter_and_scale(
+    backend: &palmtop_config::EncodeBackend,
+    scaling: bool,
+    width: u32,
+    height: u32,
+) -> String {
+    match backend {
+        palmtop_config::EncodeBackend::Vaapi { .. } => {
+            let scale = if scaling { format!(",scale_vaapi={width}:{height}") } else { String::new() };
+            format!("format=nv12,hwupload{scale}")
+        }
+        palmtop_config::EncodeBackend::Nvenc => {
+            let scale = if scaling { format!(",scale={width}:{height}") } else { String::new() };
+            format!("format=nv12{scale}")
+        }
+        palmtop_config::EncodeBackend::Software => {
+            // libx264's native/fastest path is yuv420p, not nv12.
+            let scale = if scaling { format!(",scale={width}:{height}") } else { String::new() };
+            format!("format=yuv420p{scale}")
+        }
+    }
+}
+
+/// Bitrate/VBV flags. Same target numbers everywhere (see this function's
+/// caller's doc comment for why); only the flag *names* VA-API/NVENC/libx264
+/// use to mean "VBR with this ceiling and this window" differ.
+fn rate_control_args(
+    backend: &palmtop_config::EncodeBackend,
+    target_kbps: u32,
+    maxrate_kbps: u32,
+    bufsize_kbit: u32,
+) -> Vec<String> {
+    let mut args = match backend {
+        palmtop_config::EncodeBackend::Vaapi { .. } => {
+            vec!["-rc_mode".to_string(), "VBR".to_string()]
+        }
+        palmtop_config::EncodeBackend::Nvenc => {
+            vec!["-rc".to_string(), "vbr".to_string()]
+        }
+        // libx264 has no separate rc-mode flag: -b:v alone selects ABR, and
+        // -maxrate/-bufsize below constrain it exactly like the other two.
+        palmtop_config::EncodeBackend::Software => {
+            vec!["-preset".to_string(), "ultrafast".to_string(), "-tune".to_string(), "zerolatency".to_string()]
+        }
+    };
+    args.extend([
+        "-b:v".to_string(), format!("{target_kbps}k"),
+        "-maxrate".to_string(), format!("{maxrate_kbps}k"),
+        "-bufsize".to_string(), format!("{bufsize_kbit}k"),
+    ]);
+    args
 }
 
 /// Pulls frames off the [`FrameSlot`] and writes them to ffmpeg's stdin.
@@ -430,5 +524,77 @@ mod tests {
         let out = s.push(b);
         assert_eq!(out.len(), 1);
         assert!(out[0].0);
+    }
+
+    // --- multi-backend ffmpeg argument construction -----------------------
+    //
+    // These pin the exact flags each backend needs without requiring the
+    // hardware to exist -- real end-to-end verification (does ffmpeg accept
+    // these flags and actually produce H.264 on real VA-API/NVENC/software)
+    // was done by hand against real hardware and a controlled fake ffmpeg
+    // that fails only the backends under test; that isn't something CI can
+    // repeat, so what's checked here is the one thing that can be pinned in
+    // a plain unit test: that the three backends produce genuinely different,
+    // individually-correct argument sets rather than one path accidentally
+    // reusing another's flags.
+
+    fn vaapi() -> palmtop_config::EncodeBackend {
+        palmtop_config::EncodeBackend::Vaapi { render_node: "/dev/dri/renderD128".to_string() }
+    }
+
+    #[test]
+    fn only_vaapi_gets_a_hwaccel_device() {
+        assert_eq!(hwaccel_args(&vaapi()), vec!["-init_hw_device", "vaapi=va:/dev/dri/renderD128"]);
+        assert!(hwaccel_args(&palmtop_config::EncodeBackend::Nvenc).is_empty());
+        assert!(hwaccel_args(&palmtop_config::EncodeBackend::Software).is_empty());
+    }
+
+    #[test]
+    fn each_backend_uses_its_own_pixel_format_and_scale_filter() {
+        assert_eq!(filter_and_scale(&vaapi(), false, 1280, 720), "format=nv12,hwupload");
+        assert_eq!(
+            filter_and_scale(&vaapi(), true, 1280, 720),
+            "format=nv12,hwupload,scale_vaapi=1280:720"
+        );
+        assert_eq!(
+            filter_and_scale(&palmtop_config::EncodeBackend::Nvenc, true, 1280, 720),
+            "format=nv12,scale=1280:720"
+        );
+        // libx264's native pixel format is yuv420p, not nv12 -- getting this
+        // one wrong doesn't fail loudly, it just costs an extra conversion
+        // ffmpeg performs silently, so it is worth pinning explicitly.
+        assert_eq!(
+            filter_and_scale(&palmtop_config::EncodeBackend::Software, true, 1280, 720),
+            "format=yuv420p,scale=1280:720"
+        );
+    }
+
+    #[test]
+    fn no_scale_filter_is_added_when_the_preset_matches_the_source_size() {
+        assert_eq!(filter_and_scale(&palmtop_config::EncodeBackend::Nvenc, false, 1920, 1080), "format=nv12");
+        assert_eq!(
+            filter_and_scale(&palmtop_config::EncodeBackend::Software, false, 1920, 1080),
+            "format=yuv420p"
+        );
+    }
+
+    #[test]
+    fn each_backend_spells_vbr_its_own_way_but_shares_the_same_bitrate_numbers() {
+        let vaapi_args = rate_control_args(&vaapi(), 2000, 4000, 400);
+        let nvenc_args = rate_control_args(&palmtop_config::EncodeBackend::Nvenc, 2000, 4000, 400);
+        let sw_args = rate_control_args(&palmtop_config::EncodeBackend::Software, 2000, 4000, 400);
+
+        assert_eq!(vaapi_args[0], "-rc_mode");
+        assert_eq!(nvenc_args[0], "-rc");
+        assert_eq!(sw_args[0], "-preset"); // libx264 has no rc-mode flag at all
+
+        // Whatever the flags leading up to it, the actual numbers must agree
+        // across backends -- the whole point of sharing preset/maxrate math
+        // in one place rather than three.
+        for args in [&vaapi_args, &nvenc_args, &sw_args] {
+            assert!(args.contains(&"-b:v".to_string()) && args.contains(&"2000k".to_string()));
+            assert!(args.contains(&"-maxrate".to_string()) && args.contains(&"4000k".to_string()));
+            assert!(args.contains(&"-bufsize".to_string()) && args.contains(&"400k".to_string()));
+        }
     }
 }

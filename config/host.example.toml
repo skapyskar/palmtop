@@ -18,6 +18,15 @@ port = 9999
 vaapi_render_node = "/dev/dri/renderD128"
 
 [encode]
+# "h264_vaapi" (the default) means "figure it out": palmtopd tries VA-API on
+# every render node, then NVENC, then software libx264, and uses whichever
+# actually works on this machine -- see `palmtopd --doctor` to check all
+# three, and the daemon's own startup log for which one it picked. Set this
+# explicitly only to pin one:
+#   "h264_nvenc"  -- force NVENC (skips VA-API entirely)
+#   "libx264"     -- force software encoding (real CPU cost, but works
+#                    almost anywhere -- useful if a hardware encoder is
+#                    technically available but you want the fallback anyway)
 codec = "h264_vaapi"
 qp    = 24
 fps   = 30

@@ -124,7 +124,10 @@ pub fn run(cfg: Option<&palmtop_config::HostConfig>) -> Result<bool> {
     check_pipewire(&mut r);
     check_ffmpeg(&mut r);
     check_vaapi(&mut r, cfg);
+    check_nvenc(&mut r);
+    check_software(&mut r);
     check_config(&mut r, cfg);
+    check_resolved_backend(&mut r, cfg);
 
     print!("{}", r.render());
     Ok(r.failures() == 0)
@@ -249,50 +252,46 @@ fn check_ffmpeg(r: &mut Report) {
 
 /// The check that matters most, and the one that has to be done by *doing*.
 ///
-/// Enumerates every DRM render node and actually encodes a few frames through
-/// each with the configured codec. A node existing proves nothing: hybrid-GPU
-/// laptops expose several, typically only one of which can hardware-encode
-/// H.264, and the default `/dev/dri/renderD128` is frequently the wrong one.
+/// Tries every encoder Palmtop knows how to use -- VA-API on each DRM render
+/// node, NVENC, and software libx264 -- and reports each independently, since
+/// any one of them working is enough for the daemon to actually stream (see
+/// `HostConfig::resolved_encode_backend`, which tries them in this same
+/// order). A machine failing VA-API is not a machine that cannot run
+/// Palmtop; the report used to say exactly that, back when VA-API was the
+/// only backend that existed.
 fn check_vaapi(r: &mut Report, cfg: Option<&palmtop_config::HostConfig>) {
-    let codec = cfg.map(|c| c.encode.codec.clone()).unwrap_or_else(|| "h264_vaapi".to_string());
+    let codec = "h264_vaapi";
     let configured = cfg.map(|c| c.gpu.vaapi_render_node.clone()).unwrap_or_default();
-
-    let mut nodes: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("renderD") {
-                nodes.push(format!("/dev/dri/{name}"));
-            }
-        }
-    }
-    nodes.sort();
+    let nodes = palmtop_config::render_nodes();
 
     if nodes.is_empty() {
-        r.fail(
-            "GPU render nodes",
+        r.warn(
+            "VA-API render nodes",
             "none found under /dev/dri",
-            "No DRM render node means no hardware encoder. If this is a VM or a headless\n\
-             machine, hardware encode is not available at all. On real hardware, check that\n\
+            "No DRM render node means no VA-API hardware encode. If this is a VM or a\n\
+             headless machine, that is expected -- NVENC or software encoding (checked\n\
+             separately below) may still work. On real hardware with a GPU, check that\n\
              your GPU driver is loaded and that you are in the `video`/`render` group:\n\
                sudo usermod -aG video,render $USER    (then log out and back in)",
         );
         return;
     }
 
-    let working: Vec<&String> = nodes.iter().filter(|n| vaapi_encodes(n, &codec)).collect();
+    let working: Vec<&String> =
+        nodes.iter().filter(|n| palmtop_config::node_can_encode(n, codec)).collect();
 
     if working.is_empty() {
-        r.fail(
+        r.warn(
             "VA-API hardware encode",
             format!("no node among [{}] can encode {codec}", nodes.join(", ")),
-            "Every render node was tried and none could hardware-encode. Install your\n\
-             driver's VA-API package and verify with `vainfo`:\n\
+            "Every render node was tried and none could hardware-encode. This machine may\n\
+             still work via NVENC or software encoding (checked separately below). To fix\n\
+             VA-API specifically, install your driver's VA-API package and verify with\n\
+             `vainfo`:\n\
                Intel     intel-media-driver (or libva-intel-driver on older chips)\n\
                AMD       libva-mesa-driver / mesa-va-drivers\n\
-               NVIDIA    nvidia-vaapi-driver (or switch the codec to a NVENC encoder)\n\
-             If `vainfo` shows no H264 entrypoint, this machine cannot hardware-encode and\n\
-             Palmtop will not work on it as currently configured.",
+               NVIDIA    nvidia-vaapi-driver (inconsistently packaged -- NVENC below is\n\
+                         usually the more reliable path on NVIDIA)",
         );
         return;
     }
@@ -313,13 +312,13 @@ fn check_vaapi(r: &mut Report, cfg: Option<&palmtop_config::HostConfig>) {
     } else if working.iter().any(|w| **w == configured) {
         r.pass("Configured render node", configured);
     } else {
-        r.fail(
+        r.warn(
             "Configured render node",
             format!("{configured} cannot encode {codec}"),
             &format!(
-                "This is almost certainly why the phone connects but never shows a picture:\n\
-                 the encoder fails to start and no frame is ever produced.\n\
-                 Edit the `vaapi_render_node` line in your host.toml to:\n\
+                "Not fatal -- the daemon auto-heals this at startup by picking a working node\n\
+                 instead. To silence this warning, edit the `vaapi_render_node` line in your\n\
+                 host.toml to:\n\
                    vaapi_render_node = \"{}\"\n\
                  or clear it (vaapi_render_node = \"\") to auto-detect on every start.",
                 list[0]
@@ -328,26 +327,63 @@ fn check_vaapi(r: &mut Report, cfg: Option<&palmtop_config::HostConfig>) {
     }
 }
 
-/// Encodes a few generated frames and reports whether ffmpeg succeeded.
-///
-/// Deliberately end-to-end through the same encoder the daemon uses, so a
-/// pass here means the real pipeline's encode stage will start. Output goes
-/// to /dev/null; only the exit status is of interest.
-fn vaapi_encodes(node: &str, codec: &str) -> bool {
-    Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-init_hw_device"])
-        .arg(format!("vaapi=va:{node}"))
-        .args([
-            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
-            "-vf", "format=nv12,hwupload",
-            "-c:v", codec,
-            "-f", "null", "-",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// NVENC, checked the same "prove it by doing it" way as VA-API. Common on
+/// machines where VA-API is the one that does not work: NVIDIA's VA-API shim
+/// is inconsistently packaged across distros, while NVENC support usually
+/// just needs the proprietary driver already installed for anything else
+/// NVIDIA-related to work.
+fn check_nvenc(r: &mut Report) {
+    if palmtop_config::nvenc_encodes() {
+        r.pass("NVENC hardware encode", "works (h264_nvenc)");
+    } else {
+        r.warn(
+            "NVENC hardware encode",
+            "not available",
+            "Expected on any non-NVIDIA machine. On an NVIDIA GPU, this usually means the\n\
+             proprietary driver is not installed, or ffmpeg was built without NVENC support\n\
+             -- check with:  ffmpeg -hide_banner -encoders | grep nvenc",
+        );
+    }
+}
+
+/// Software libx264, the last resort: works on essentially any machine, at
+/// the cost of real CPU time instead of a GPU's. Still worth verifying
+/// rather than assuming -- some distributions ship an ffmpeg built without
+/// libx264 for licensing reasons, in which case even this backend is absent.
+fn check_software(r: &mut Report) {
+    if palmtop_config::software_encodes() {
+        r.pass("Software encode", "works (libx264) -- the fallback of last resort");
+    } else {
+        r.warn(
+            "Software encode",
+            "libx264 not available in this ffmpeg build",
+            "If VA-API and NVENC also failed above, this machine cannot encode video at all\n\
+             with the current ffmpeg. Install a build with libx264, e.g. on Debian/Ubuntu\n\
+             the distro ffmpeg package normally includes it already; on a from-source build,\n\
+             configure with --enable-libx264 --enable-gpl.",
+        );
+    }
+}
+
+/// The verdict that actually matters: which backend, if any, the daemon will
+/// really use. Everything above explains *why*; this is the one line that
+/// answers "will this machine work at all".
+fn check_resolved_backend(r: &mut Report, cfg: Option<&palmtop_config::HostConfig>) {
+    let Some(cfg) = cfg else {
+        return; // check_config already reports the missing-config failure.
+    };
+    match cfg.resolved_encode_backend() {
+        Ok(backend) => r.pass("Video encoder", format!("will stream via {backend}")),
+        Err(e) => r.fail(
+            "Video encoder",
+            "no working backend found",
+            &format!(
+                "{e:#}\nNone of VA-API, NVENC, or software encoding work on this machine with \
+                 the currently installed ffmpeg. See the individual checks above for what to \
+                 install."
+            ),
+        ),
+    }
 }
 
 fn check_config(r: &mut Report, cfg: Option<&palmtop_config::HostConfig>) {
