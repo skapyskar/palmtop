@@ -124,14 +124,24 @@ jobs:
       - name: Build
         run: cargo build --release -p palmtopd
 
+      # Flat, self-contained: install.sh and friends detect this layout by the
+      # palmtopd binary sitting right beside them (no Cargo.toml, no config/
+      # or systemd/ subdirectory to find) and adjust every path accordingly --
+      # see scripts/install.sh. Everything the scripts need to run standalone
+      # must be copied in here; a script that "works from the repo" but isn't
+      # staged into the tarball is broken for every real release user, which
+      # is exactly the failure the very first release (v0.1.0) shipped with.
       - name: Stage tarball
         run: |
           version="${GITHUB_REF_NAME:-dev}"
           staging="palmtopd-${version}-linux-x86_64"
           mkdir -p "dist/$staging"
           cp target/release/palmtopd "dist/$staging/"
-          cp scripts/install.sh scripts/pair-usb.sh scripts/show-pair-qr.sh "dist/$staging/"
+          cp scripts/install.sh scripts/install-service.sh scripts/pair-usb.sh \
+             scripts/show-pair-qr.sh scripts/host-config.sh "dist/$staging/"
+          chmod +x "dist/$staging"/*.sh
           cp config/host.example.toml "dist/$staging/"
+          cp systemd/palmtopd.service "dist/$staging/"
           cp README.md "dist/$staging/" 2>/dev/null || true
           tar -czf "dist/${staging}.tar.gz" -C dist "$staging"
           ls -la dist/

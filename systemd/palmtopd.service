@@ -18,7 +18,8 @@ Description=Palmtop host daemon (capture -> encode -> stream, wlr input injectio
 [Service]
 Type=simple
 ExecStart=__PALMTOPD_BIN__
-WorkingDirectory=__PALMTOP_REPO__
+WorkingDirectory=__PALMTOP_WORKDIR__
+Environment=PALMTOP_CONFIG_DIR=__PALMTOP_CONFIG_DIR__
 Restart=on-failure
 RestartSec=2
 # No root, no elevated capabilities -- matches plan §3.6/§6 (least privilege).

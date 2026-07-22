@@ -314,8 +314,11 @@ fn no_device_help(dir: &Path) -> String {
 
 // ---------------------------------------------------------------- helpers
 
-/// Locates `config/` by walking up from the executable or CWD, so binaries work
-/// from anywhere in the tree.
+/// Locates `config/` by walking up from the CWD (developer checkout
+/// workflow), falling back to the user's XDG config dir for a release
+/// install, which has no `config/host.example.toml` anywhere to find --
+/// `scripts/install.sh` seeds `host.toml` directly into that XDG directory
+/// for exactly this case.
 pub fn config_dir() -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var("PALMTOP_CONFIG_DIR") {
         return Ok(PathBuf::from(explicit));
@@ -327,12 +330,17 @@ pub fn config_dir() -> Result<PathBuf> {
             return Ok(candidate);
         }
         if !dir.pop() {
-            bail!(
-                "could not locate the config/ directory -- run from inside the repo, \
-                 or set PALMTOP_CONFIG_DIR"
-            );
+            break;
         }
     }
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .context(
+            "could not locate the config/ directory, and neither XDG_CONFIG_HOME nor HOME \
+             is set to fall back to -- set PALMTOP_CONFIG_DIR explicitly",
+        )?;
+    Ok(base.join("palmtop"))
 }
 
 /// Primary outbound IPv4 address, found by asking the routing table which

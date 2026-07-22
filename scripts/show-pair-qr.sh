@@ -14,7 +14,14 @@
 # the detail. Fullscreen vector output fixes that outright.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Same dual-layout detection as install.sh/pair-usb.sh.
+if [ -x "$SCRIPT_DIR/palmtopd" ]; then
+  CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/palmtop"
+else
+  CONFIG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/config"
+fi
 
 # The daemon writes this on every start (see pairing.rs::write_qr_svg): 0600 on
 # a user-private tmpfs, because it embeds the pairing token.
@@ -23,7 +30,7 @@ QR_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/palmtop-pair.svg"
 if [ ! -f "$QR_FILE" ]; then
   # Fall back to generating it from the config, so this still works if the
   # daemon isn't running (or is an older build).
-  source "$REPO_ROOT/scripts/device.sh"
+  source "$SCRIPT_DIR/host-config.sh"
   if [ -z "${PAIRING_TOKEN:-}" ] || [ -z "${PAIRING_PUBKEY:-}" ]; then
     echo "error: no pairing token/pubkey in config -- start palmtopd once to generate them." >&2
     exit 1

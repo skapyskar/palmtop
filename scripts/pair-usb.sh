@@ -25,11 +25,23 @@
 # first. USB pairing closes that gap for anyone who wants it closed.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="dev.palmtop.client"
-APK="$REPO_ROOT/android/app/build/outputs/apk/debug/app-debug.apk"
 
-source "$REPO_ROOT/scripts/device.sh"
+# Same dual-layout detection as install.sh: a release tarball has this script
+# sitting flat next to a downloadable .apk (if the user placed one there) and
+# no repo around it; a git checkout has a debug build under android/.
+if [ -x "$SCRIPT_DIR/palmtopd" ]; then
+  CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/palmtop"
+  APK="$(ls "$SCRIPT_DIR"/*.apk 2>/dev/null | head -1 || true)"
+else
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  CONFIG_DIR="$REPO_ROOT/config"
+  APK="$REPO_ROOT/android/app/build/outputs/apk/debug/app-debug.apk"
+  [ -f "$APK" ] || APK=""
+fi
+
+source "$SCRIPT_DIR/host-config.sh"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -59,26 +71,28 @@ say "Detected: ${model:-unknown device} ($usb_serial)"
 # --- 2. make sure the app is installed ---------------------------------------
 if adb -s "$usb_serial" shell pm list packages 2>/dev/null | grep -q "^package:$PKG$"; then
   say "App already installed."
-else
-  [ -f "$APK" ] || fail "app is not installed on the phone and no APK was found at
-       $APK
-       Build one with:  cd android && ./gradlew assembleDebug
-       or download a release APK and install it on the phone manually."
-  say "Installing the app..."
+elif [ -n "$APK" ]; then
+  say "Installing $APK ..."
   adb -s "$usb_serial" install -r "$APK" >/dev/null || fail "install failed"
   say "Installed."
+else
+  fail "app is not installed on the phone, and no .apk was found next to this script.
+       Download the release .apk and either:
+         - place it in this directory and re-run this script, or
+         - install it on the phone manually, then re-run this script to pair."
 fi
 
 # --- 3. check the daemon is actually running ---------------------------------
-[ -n "${PAIRING_TOKEN:-}" ] || fail "no pairing token in config/host.toml.
-       Start palmtopd once so it can generate one:  ./scripts/install-service.sh"
-[ -n "${PAIRING_PUBKEY:-}" ] || fail "no host key in config/host.toml.
-       Start palmtopd once so it can generate one:  ./scripts/install-service.sh"
+[ -n "${PAIRING_TOKEN:-}" ] || fail "no pairing token in $CONFIG_DIR/host.toml.
+       Start palmtopd once so it can generate one -- run ./install.sh (or
+       ./scripts/install-service.sh in a repo checkout)."
+[ -n "${PAIRING_PUBKEY:-}" ] || fail "no host key in $CONFIG_DIR/host.toml.
+       Start palmtopd once so it can generate one -- run ./install.sh (or
+       ./scripts/install-service.sh in a repo checkout)."
 
 if ! (echo > "/dev/tcp/${HOST_IP}/${HOST_PORT}") 2>/dev/null; then
   say "warning: nothing is listening on ${HOST_IP}:${HOST_PORT} yet."
-  say "         Pairing will still be saved, but start the daemon before connecting:"
-  say "           ./scripts/install-service.sh"
+  say "         Pairing will still be saved, but start the daemon before connecting."
 fi
 
 # --- 4. hand over the credentials --------------------------------------------
