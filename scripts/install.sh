@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Install the Palmtop host daemon on this Linux machine.
 #
-#   ./install.sh              # from a release tarball: use the bundled binary
-#   ./scripts/install.sh      # from a git checkout: build from source
+#   ./install.sh                  # from a release tarball: use the bundled binary
+#   ./scripts/install.sh          # from a git checkout: build from source
+#   ./install.sh --keep-pairing   # upgrade without re-pairing your phones
+#
+# Always a clean install: anything from a previous install is removed first
+# (see uninstall.sh), so a reinstall can never inherit a half-broken service,
+# a stale binary, or a config written by an older version. The cost is that
+# the pairing token and host key are regenerated too, so paired phones must
+# pair again -- pass --keep-pairing when upgrading if that matters.
 #
 # Installs palmtopd to ~/.local/bin, registers it as a systemd --user service,
 # and prints the QR code to pair a phone with.
@@ -20,6 +27,20 @@ BIN_DIR="${HOME}/.local/bin"
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+KEEP_PAIRING=0
+FROM_RELEASE=0
+for arg in "$@"; do
+  case "$arg" in
+    --keep-pairing) KEEP_PAIRING=1 ;;
+    # Release-tarball layout is detected directly now, so this is only
+    # meaningful in a repo checkout ("use the palmtopd already on PATH rather
+    # than building"). Still accepted because it appeared in v0.1.x's own
+    # release notes and should not start erroring for anyone following those.
+    --from-release) FROM_RELEASE=1 ;;
+    *) fail "unknown argument: $arg (try --keep-pairing)" ;;
+  esac
+done
 
 # Two layouts this script can find itself in:
 #   - a release tarball: extracted flat, palmtopd sitting right beside this
@@ -51,6 +72,22 @@ if [ "$RELEASE_MODE" = "1" ]; then
   CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/palmtop"
 else
   CONFIG_DIR="$REPO_ROOT/config"
+fi
+
+# --- 0. remove any previous install ------------------------------------------
+# Done before anything else so the rest of this script only ever has to handle
+# the clean case. Upgrading in place was how a machine ended up running a stale
+# binary under a unit file written by a different version -- states that are
+# tedious to reason about and trivial to avoid by not having them.
+UNINSTALL_SH="$SCRIPT_DIR/uninstall.sh"
+if [ -x "$UNINSTALL_SH" ]; then
+  keep_args=""
+  [ "$KEEP_PAIRING" = "1" ] && keep_args="--keep-pairing"
+  say "Removing any previous install..."
+  # shellcheck disable=SC2086
+  "$UNINSTALL_SH" --yes --quiet $keep_args || warn "cleanup reported a problem; continuing"
+else
+  warn "uninstall.sh not found next to this script -- installing over whatever is there."
 fi
 
 # --- 1. dependencies ---------------------------------------------------------
@@ -86,7 +123,7 @@ mkdir -p "$BIN_DIR"
 if [ "$RELEASE_MODE" = "1" ]; then
   install -m755 "$SCRIPT_DIR/palmtopd" "$BIN_DIR/palmtopd"
   say "Installed to $BIN_DIR/palmtopd"
-elif [ "${1:-}" = "--from-release" ]; then
+elif [ "$FROM_RELEASE" = "1" ]; then
   command -v palmtopd >/dev/null || fail "--from-release given but palmtopd is not on PATH"
   # Copied into BIN_DIR (not just left on PATH) so the systemd unit below has
   # one stable ExecStart regardless of where PATH resolves palmtopd today.
@@ -108,8 +145,13 @@ case ":$PATH:" in
 esac
 
 # --- 3. config ---------------------------------------------------------------
+# Normally absent by now: step 0 removed it, so this writes a fresh one and
+# the daemon generates a new pairing token and host key on first start. With
+# --keep-pairing the existing file survives and is reused as-is.
 mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_DIR/host.toml" ]; then
+if [ -f "$CONFIG_DIR/host.toml" ]; then
+  say "Keeping the existing $CONFIG_DIR/host.toml -- phones stay paired."
+else
   say "Creating $CONFIG_DIR/host.toml from the template..."
   cp "$TEMPLATE" "$CONFIG_DIR/host.toml"
   # Empty means auto-detect at runtime, which is what keeps this working
@@ -169,4 +211,11 @@ say "     2. $show_qr"
 say "     3. In the app: Devices -> Add by scanning QR"
 say ""
 say "  Logs:  journalctl --user -u palmtopd -f"
+if [ "$RELEASE_MODE" = "1" ]; then
+  say "  Check this machine can capture/encode:  ./palmtopd --doctor"
+  say "  Remove Palmtop completely:              ./uninstall.sh"
+else
+  say "  Check this machine can capture/encode:  palmtopd --doctor"
+  say "  Remove Palmtop completely:              ./scripts/uninstall.sh"
+fi
 say ""

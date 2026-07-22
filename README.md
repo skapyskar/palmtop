@@ -56,6 +56,21 @@ cd palmtop
 Either way this installs `palmtopd`, starts it as a background service that
 survives reboots, and prints a QR code. Nothing needs `sudo`.
 
+Installing is always a **clean** install: any previous install is removed
+first, so you can never end up running a stale binary under a config written
+by an older version. That includes the pairing token, so paired phones will
+need to pair again — use `./install.sh --keep-pairing` when upgrading if you
+would rather not re-pair.
+
+### Removing it
+
+```bash
+./uninstall.sh
+```
+
+Removes the service, the binary, the pairing token and the host's private
+key. It asks first, and `--keep-pairing` keeps your phones paired.
+
 ### 3. Pair the two
 
 Pick whichever suits you. The result is the same: the laptop is saved in the

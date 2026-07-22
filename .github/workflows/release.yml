@@ -153,8 +153,9 @@ jobs:
           staging="palmtopd-${version}-linux-x86_64"
           mkdir -p "dist/$staging/adb-tools"
           cp target/release/palmtopd "dist/$staging/"
-          cp scripts/install.sh scripts/install-service.sh scripts/pair-usb.sh \
-             scripts/show-pair-qr.sh scripts/host-config.sh "dist/$staging/"
+          cp scripts/install.sh scripts/uninstall.sh scripts/install-service.sh \
+             scripts/pair-usb.sh scripts/show-pair-qr.sh scripts/host-config.sh \
+             "dist/$staging/"
           chmod +x "dist/$staging"/*.sh
           cp config/host.example.toml "dist/$staging/"
           cp systemd/palmtopd.service "dist/$staging/"
