@@ -150,7 +150,8 @@ block a device from reaching it. This is the single most common cause.
 **`pair-usb.sh` says no phone found.**
 Check USB debugging is on, the cable carries data (some charge-only cables do
 not), and that you accepted the "Allow USB debugging?" prompt on the phone.
-`adb devices` on the laptop should list it.
+`./adb-tools/adb devices` (the release tarball bundles its own `adb`, so no
+separate install is needed) should list it.
 
 **It connected once and now will not.**
 Your laptop's IP probably changed. Re-pair — the saved entry updates in place

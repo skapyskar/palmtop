@@ -46,6 +46,23 @@ source "$SCRIPT_DIR/host-config.sh"
 say() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Prefer the adb bundled in the release tarball (adb-tools/adb, fetched from
+# Google's own platform-tools during the release build) so pairing needs no
+# separate Android SDK/platform-tools install. Falls back to a system adb for
+# repo checkouts and anyone who already has one on PATH.
+if [ -x "$SCRIPT_DIR/adb-tools/adb" ]; then
+  ADB="$SCRIPT_DIR/adb-tools/adb"
+elif command -v adb >/dev/null; then
+  ADB="$(command -v adb)"
+else
+  fail "adb not found (and no bundled copy at $SCRIPT_DIR/adb-tools/adb).
+       Install Android platform-tools, e.g.:
+         Arch      sudo pacman -S android-tools
+         Fedora    sudo dnf install android-tools
+         Debian    sudo apt install android-tools-adb"
+fi
+adb() { "$ADB" "$@"; }
+
 # --- 1. find the phone -------------------------------------------------------
 # A USB serial never contains a colon; a TCP one is always "ip:port". Pairing
 # has to happen over the cable specifically, so a device already connected

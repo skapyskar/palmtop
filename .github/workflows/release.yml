@@ -113,7 +113,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libclang-dev libxkbcommon-dev pkg-config
+          sudo apt-get install -y libpipewire-0.3-dev libclang-dev libxkbcommon-dev pkg-config unzip
 
       - name: Tests
         run: cargo test --workspace
@@ -123,6 +123,22 @@ jobs:
 
       - name: Build
         run: cargo build --release -p palmtopd
+
+      # pair-usb.sh needs adb, and requiring a user to separately install
+      # Android platform-tools before they can even pair defeats the point of
+      # a self-contained installer. Bundling Google's own official
+      # platform-tools build (Apache-2.0, redistributable -- see the bundled
+      # NOTICE.txt) means pair-usb.sh works with zero extra installs.
+      - name: Fetch adb
+        run: |
+          curl -fsSL -o /tmp/platform-tools.zip \
+            https://dl.google.com/android/repo/platform-tools-latest-linux.zip
+          mkdir -p adb-tools
+          unzip -q /tmp/platform-tools.zip -d /tmp/platform-tools
+          cp /tmp/platform-tools/platform-tools/adb adb-tools/
+          cp /tmp/platform-tools/platform-tools/NOTICE.txt adb-tools/ 2>/dev/null || true
+          chmod +x adb-tools/adb
+          adb-tools/adb version
 
       # Flat, self-contained: install.sh and friends detect this layout by the
       # palmtopd binary sitting right beside them (no Cargo.toml, no config/
@@ -135,13 +151,15 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME:-dev}"
           staging="palmtopd-${version}-linux-x86_64"
-          mkdir -p "dist/$staging"
+          mkdir -p "dist/$staging/adb-tools"
           cp target/release/palmtopd "dist/$staging/"
           cp scripts/install.sh scripts/install-service.sh scripts/pair-usb.sh \
              scripts/show-pair-qr.sh scripts/host-config.sh "dist/$staging/"
           chmod +x "dist/$staging"/*.sh
           cp config/host.example.toml "dist/$staging/"
           cp systemd/palmtopd.service "dist/$staging/"
+          cp adb-tools/adb "dist/$staging/adb-tools/"
+          cp adb-tools/NOTICE.txt "dist/$staging/adb-tools/" 2>/dev/null || true
           cp README.md "dist/$staging/" 2>/dev/null || true
           tar -czf "dist/${staging}.tar.gz" -C dist "$staging"
           ls -la dist/

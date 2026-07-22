@@ -117,7 +117,18 @@ impl HostConfig {
         // correctly attach to whichever `[pairing]` table is already open,
         // which is always the last section in files this function writes.
         let mut appended = String::new();
-        let has_pairing_header = text.contains("[pairing]");
+        // A naive text.contains("[pairing]") is fooled by host.example.toml's
+        // own explanatory comment ("# [pairing] is NOT listed here on
+        // purpose..."), which contains that exact substring despite there
+        // being no real [pairing] table. That false positive suppressed the
+        // header on every fresh install, so the generated token/keypair
+        // silently attached to whatever table happened to be physically last
+        // in the file (`[encode]`) instead -- never read back as `pairing`
+        // on the next load, so every restart "discovered" a missing token
+        // and appended another one, until two collided as a duplicate key
+        // and crashed the daemon for good. Match only a real section header
+        // line, not the substring anywhere in the text.
+        let has_pairing_header = text.lines().any(|line| line.trim() == "[pairing]");
         let open_header = |appended: &mut String| {
             if !has_pairing_header && appended.is_empty() {
                 appended.push_str("\n[pairing]\n");
@@ -363,4 +374,98 @@ fn generate_token() -> Result<String> {
         .read_exact(&mut bytes)
         .context("read /dev/urandom")?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // HostConfig::load() resolves its directory through the PALMTOP_CONFIG_DIR
+    // env var, which is process-wide -- serialize the tests that set it so
+    // they can't race each other under cargo test's default parallelism.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn unique_temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "palmtop-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // Mirrors config/host.example.toml's real shape: [encode] is the last
+    // real table, followed only by a comment that happens to contain the
+    // literal substring "[pairing]" despite there being no real [pairing]
+    // table anywhere in the file.
+    const HOST_TOML_WITH_MISLEADING_COMMENT: &str = r#"
+[host]
+ip = ""
+port = 9999
+
+[gpu]
+vaapi_render_node = "/dev/dri/renderD128"
+
+[encode]
+codec = "h264_vaapi"
+qp = 24
+fps = 30
+async_depth = 1
+
+# [pairing] is NOT listed here on purpose -- generated on first run.
+"#;
+
+    #[test]
+    fn a_fresh_config_survives_repeated_loads_without_crashing_or_duplicating_the_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_dir();
+        std::fs::write(dir.join("host.toml"), HOST_TOML_WITH_MISLEADING_COMMENT).unwrap();
+        std::env::set_var("PALMTOP_CONFIG_DIR", &dir);
+
+        let first = HostConfig::load().expect("first load should generate pairing info");
+        assert!(!first.pairing.token.is_empty());
+        assert!(!first.pairing.noise_public_key.is_empty());
+
+        // The real bug this reproduces: a second load (e.g. a systemd
+        // restart) used to append a *second* generated token, because the
+        // first run's token had silently attached to the [encode] table
+        // instead of a real [pairing] table and was never read back as
+        // `pairing.token`. That produced a duplicate-key TOML parse error
+        // on exactly this second load, which crash-looped the daemon for
+        // good on a real user's machine.
+        let second = HostConfig::load().expect("second load must not crash");
+        assert_eq!(first.pairing.token, second.pairing.token);
+        assert_eq!(first.pairing.noise_public_key, second.pairing.noise_public_key);
+
+        // A third load, matching the crash-loop restart count actually
+        // observed.
+        let third = HostConfig::load().expect("third load must not crash either");
+        assert_eq!(first.pairing.token, third.pairing.token);
+
+        std::env::remove_var("PALMTOP_CONFIG_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_generated_pairing_section_is_a_real_toml_table_not_just_matching_text() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = unique_temp_dir();
+        std::fs::write(dir.join("host.toml"), HOST_TOML_WITH_MISLEADING_COMMENT).unwrap();
+        std::env::set_var("PALMTOP_CONFIG_DIR", &dir);
+
+        HostConfig::load().expect("load should succeed");
+        let persisted = std::fs::read_to_string(dir.join("host.toml")).unwrap();
+        assert!(
+            persisted.lines().any(|line| line.trim() == "[pairing]"),
+            "expected a real [pairing] section header, got:\n{persisted}"
+        );
+
+        std::env::remove_var("PALMTOP_CONFIG_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
