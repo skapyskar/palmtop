@@ -179,7 +179,7 @@ try_pair() {
     3. It shows an IP:PORT and a 6-digit code
 
   Then run, with the values it showed:
-    ./scripts/connect-device.sh pair 192.168.3.161:37123 123456
+    ./scripts/connect-device.sh pair 192.168.1.42:37123 123456
 
   The pairing port is not the connection port -- after pairing, the same
   screen's top line shows the IP:PORT to connect to.

@@ -280,7 +280,8 @@ screen content constant.
 
 # Measured results (2026-07-22)
 
-Moto G71 5G over the phone's own hotspot, 25s per mode, palmtopd on Arch/Hyprland.
+A mid-range Android 12 phone (Snapdragon 695) over its own hotspot, 25s per
+mode, palmtopd on Arch/Hyprland.
 Two content workloads: a static desktop, and a fullscreen 1080p30 high-motion clip.
 
 ## Final numbers

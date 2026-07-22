@@ -16,13 +16,14 @@ import org.junit.Test;
 public class PairedDeviceTest {
 
     private static PairedDevice device(String host, int port, String pubkey) {
-        return new PairedDevice("archlinux", host, port, "tok", pubkey, 1000L);
+        return new PairedDevice("my-laptop", host, port, "tok", pubkey, 1000L);
     }
 
     @Test
     public void sameHostKeyMeansSameDeviceEvenAtADifferentAddress() {
-        PairedDevice before = device("192.168.217.186", 9999, "abc123");
-        PairedDevice after = device("192.168.3.186", 9999, "abc123");
+        // Same laptop, seen on two different networks.
+        PairedDevice before = device("192.0.2.10", 9999, "abc123");
+        PairedDevice after = device("192.0.2.20", 9999, "abc123");
         assertTrue("a laptop that changed networks is still the same laptop",
                 before.sameDeviceAs(after));
     }
@@ -31,14 +32,14 @@ public class PairedDeviceTest {
     public void differentHostKeysAreDifferentDevicesEvenAtTheSameAddress() {
         // Two different laptops can genuinely occupy the same address at
         // different times (DHCP reuse), so the address must not imply identity.
-        PairedDevice a = device("192.168.3.186", 9999, "aaa");
-        PairedDevice b = device("192.168.3.186", 9999, "bbb");
+        PairedDevice a = device("192.0.2.20", 9999, "aaa");
+        PairedDevice b = device("192.0.2.20", 9999, "bbb");
         assertFalse(a.sameDeviceAs(b));
     }
 
     @Test
     public void movedToKeepsIdentityAndSecretButChangesAddress() {
-        PairedDevice original = device("192.168.217.186", 9999, "abc123");
+        PairedDevice original = device("192.0.2.10", 9999, "abc123");
         PairedDevice moved = original.movedTo("10.0.0.5", 1234);
         assertEquals("10.0.0.5", moved.host);
         assertEquals(1234, moved.port);

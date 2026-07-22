@@ -12,8 +12,9 @@ import org.json.JSONObject;
  * saved devices by address would therefore accumulate a duplicate entry for
  * every network the same machine was ever seen on, and every one of those
  * entries but the newest would silently fail to connect. This bit for real
- * during development: the host moved from 192.168.217.186 to 192.168.3.186
- * between two sessions and the stored address simply stopped working.
+ * during development: a host moved to a different subnet between two sessions
+ * and the stored address simply stopped working, while the machine itself was
+ * running fine and perfectly reachable at its new one.
  *
  * The Noise static public key is the host's cryptographic identity: stable
  * across every address change, and already the thing the client pins to

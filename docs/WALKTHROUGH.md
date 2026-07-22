@@ -140,8 +140,10 @@ shell via `source scripts/device.sh`. The Android app takes host/port as intent 
 
 ### Measured: target device + network leg
 
-**Test device:** Motorola moto g71 5G — Android 12 (SDK 31), Snapdragon 695 (`holi`),
-1080x2400 @ density 420.
+**Test device:** a mid-range Android 12 phone (SDK 31, Snapdragon 695),
+1080x2400 @ density 420. The chipset is what makes the numbers below
+meaningful -- they are mid-range figures, not flagship ones -- so it is
+named where the exact model is not.
 
 **Hardware decoders present** (from `/vendor/etc/media_codecs*.xml`):
 - `c2.qti.avc.decoder.low_latency` — **dedicated low-latency H.264** ✅
@@ -293,7 +295,7 @@ legacy `adb tcpip`, which needs USB only once:
 ```sh
 source ~/opt/android-env.sh
 adb tcpip 5555                        # with USB connected
-adb connect 192.168.217.213:5555      # phone's hotspot IP; USB can now be unplugged
+adb connect <phone-ip>:5555           # USB can now be unplugged
 ```
 
 Note this is a *dev-tooling* limitation only — the hotspot LAN itself carries app traffic

@@ -90,8 +90,8 @@ final class DeviceProfile {
             String manufacturer = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.trim();
             String model = Build.MODEL == null ? "" : Build.MODEL.trim();
             // Vendors are inconsistent about whether MODEL already includes
-            // the manufacturer ("moto g71 5G" does, "Pixel 9" does not), so
-            // only prepend when it would not duplicate.
+            // the manufacturer -- some ship "<brand> <model>" in MODEL, others
+            // just "<model>" -- so only prepend when it would not duplicate.
             if (!model.isEmpty() && !manufacturer.isEmpty()
                     && !model.toLowerCase().startsWith(manufacturer.toLowerCase())) {
                 return manufacturer + " " + model;
