@@ -64,27 +64,71 @@ final class HudView extends View {
                         format,
                 }
                 : new String[] { "measuring…", format };
+        // requestLayout(), not just invalidate(): the line count/lengths
+        // above just changed, and onMeasure derives this view's size from
+        // exactly that content -- skipping this would leave the view sized
+        // for whatever it last measured (typically the short "measuring…"
+        // placeholder), clipping the real stats block once it arrives.
+        requestLayout();
         postInvalidate();
+    }
+
+    /**
+     * A plain {@link View} that never overrides {@code onMeasure} does not
+     * "wrap content" the way its name suggests: {@code View.getDefaultSize()}
+     * resolves an {@code AT_MOST} spec (what {@code WRAP_CONTENT} normally
+     * produces) to the *full offered space*, not to the view's actual
+     * content -- true content-sizing has to be computed and reported
+     * explicitly, here. Left un-overridden, this view would balloon to
+     * whatever room a parent happens to offer it; harmless as the sole
+     * flexible element in a horizontal row, but exactly the wrong thing once
+     * this sits above other views in a vertical column, where it would claim
+     * most of the column and crowd out everything below it.
+     */
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        float[] box = contentBoxSize();
+        int width = resolveSizeAndState((int) Math.ceil(box[0]), widthMeasureSpec, 0);
+        int height = resolveSizeAndState((int) Math.ceil(box[1]), heightMeasureSpec, 0);
+        setMeasuredDimension(width, height);
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         String[] snapshot = lines; // volatile read once -- update() runs off-thread
-        float density = getResources().getDisplayMetrics().density;
-        float pad = 6f * density;
-        float lineHeight = text.getTextSize() * 1.35f;
+        float pad = padPx();
+        float lineHeight = lineHeightPx();
 
-        float boxWidth = 0;
-        for (String line : snapshot) {
-            boxWidth = Math.max(boxWidth, text.measureText(line));
-        }
-        canvas.drawRect(0, 0, boxWidth + pad * 2, lineHeight * snapshot.length + pad * 2, background);
+        canvas.drawRect(0, 0, getWidth(), getHeight(), background);
 
         float y = pad + text.getTextSize();
         for (String line : snapshot) {
             canvas.drawText(line, pad, y, text);
             y += lineHeight;
         }
+    }
+
+    private float padPx() {
+        return 6f * getResources().getDisplayMetrics().density;
+    }
+
+    private float lineHeightPx() {
+        return text.getTextSize() * 1.35f;
+    }
+
+    /** @return {width, height} this view actually needs to draw {@link #lines}
+     *  in full -- the single source of truth for both {@link #onMeasure} and
+     *  the background rect in {@link #onDraw}, so the two can never drift
+     *  apart into a box that clips its own text or draws larger than needed. */
+    private float[] contentBoxSize() {
+        String[] snapshot = lines;
+        float pad = padPx();
+        float boxWidth = 0;
+        for (String line : snapshot) {
+            boxWidth = Math.max(boxWidth, text.measureText(line));
+        }
+        float boxHeight = lineHeightPx() * snapshot.length;
+        return new float[] { boxWidth + pad * 2, boxHeight + pad * 2 };
     }
 }
