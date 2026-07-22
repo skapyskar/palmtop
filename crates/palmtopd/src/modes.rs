@@ -17,9 +17,10 @@
 
 /// Wire-stable discriminants: these cross the protocol as `Message::SetMode`,
 /// so they must not be renumbered.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
     Sync = 0,
+    #[default]
     Balanced = 1,
     Quality = 2,
     Battery = 3,
@@ -140,12 +141,6 @@ impl Mode {
                 sndbuf_bytes: sndbuf_for(3000),
             },
         }
-    }
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Balanced
     }
 }
 

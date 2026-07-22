@@ -334,11 +334,11 @@ fn run_capture(
         id: pw::spa::param::ParamType::EnumFormat.as_raw(),
         properties: vec![
             Property::new(
-                FormatProperties::MediaType.as_raw() as u32,
+                FormatProperties::MediaType.as_raw(),
                 Value::Id(Id(MediaType::Video.as_raw())),
             ),
             Property::new(
-                FormatProperties::MediaSubtype.as_raw() as u32,
+                FormatProperties::MediaSubtype.as_raw(),
                 Value::Id(Id(MediaSubtype::Raw.as_raw())),
             ),
         ],

@@ -74,7 +74,7 @@ fn main() -> Result<()> {
                     break 'session;
                 }
                 sent += 1;
-                if sent % 150 == 0 {
+                if sent.is_multiple_of(150) {
                     println!(
                         "[..] sent {sent} frames ({:.1} fps actual)",
                         sent as f64 / start.elapsed().as_secs_f64()
