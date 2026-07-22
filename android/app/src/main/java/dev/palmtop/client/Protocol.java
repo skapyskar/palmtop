@@ -18,7 +18,7 @@ public final class Protocol {
      *  defined but never actually sent), VideoFrame carries capture_us for
      *  end-to-end latency measurement, and SetMode selects a quality preset.
      *  Must equal palmtop-proto's PROTOCOL_VERSION or the handshake fails. */
-    public static final int VERSION = 4;
+    public static final int VERSION = 5;
     private static final int MAX_PAYLOAD = 16 * 1024 * 1024;
 
     public static final int TAG_HELLO = 1;
@@ -34,6 +34,7 @@ public final class Protocol {
     public static final int TAG_PING = 11;
     public static final int TAG_PONG = 12;
     public static final int TAG_SET_MODE = 13;
+    public static final int TAG_STATUS = 14;
 
     public static final int BUTTON_LEFT = 0;
     public static final int BUTTON_RIGHT = 1;
@@ -176,6 +177,11 @@ public final class Protocol {
         /** Host monotonic clock when this frame was captured (v3). */
         public long captureUs;
         public long tClientUs, tHostRecvUs, tHostSendUs;
+        /** Status only (v5): short stable stage id -- "portal", "capture",
+         *  "encode", "stream". {@link #ok} says whether that stage succeeded
+         *  and {@link #detail} carries the human-readable explanation. */
+        public String stage;
+        public String detail;
     }
 
     /** Blocks for one full message. Returns null on a clean EOF at a message boundary. */
@@ -225,6 +231,11 @@ public final class Protocol {
                 r.tClientUs = p.readLong();
                 r.tHostRecvUs = p.readLong();
                 r.tHostSendUs = p.readLong();
+                break;
+            case TAG_STATUS:
+                r.stage = readString(p);
+                r.ok = p.readUnsignedByte() != 0;
+                r.detail = readString(p);
                 break;
             default:
                 // Unknown/unhandled message from the host -- ignore the payload.

@@ -116,6 +116,7 @@ The left column has everything else:
 | **⚙ Mode** | Quality preset — see below |
 | **▭ Aspect** | Best Fit / 16:9 / 4:3 / 1:1 |
 | **📊** | Live latency stats |
+| **📋** | Session log — what the laptop is doing, and what failed |
 
 **Three fingers** on the video zooms and pans, for reading something small.
 One-finger taps keep working normally.
@@ -146,6 +147,21 @@ Many Wi-Fi networks — especially guest, café and university networks — bloc
 devices from talking to each other directly. Test it by joining the laptop to
 your phone's hotspot instead; a phone acting as its own access point cannot
 block a device from reaching it. This is the single most common cause.
+
+**The screen-share prompt never appears / the phone connects but the screen
+stays black.**
+Run the built-in check on the laptop first — it tests the real portal and
+really encodes through your GPU, and names the exact fix for anything broken:
+
+```
+palmtopd --doctor
+```
+
+Two things worth knowing. The share prompt is only requested **when a phone
+actually connects**, so it appearing at pairing time is not expected. And the
+app has a **📋 log button**: it shows what the laptop reported at every stage,
+including which one failed, so you rarely have to read the laptop's logs at
+all.
 
 **`pair-usb.sh` says no phone found.**
 Check USB debugging is on, the cable carries data (some charge-only cables do

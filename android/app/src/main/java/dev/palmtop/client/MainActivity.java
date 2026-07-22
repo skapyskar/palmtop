@@ -18,6 +18,9 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
@@ -105,6 +108,8 @@ public class MainActivity extends Activity {
      *  can be attached and removed without re-deriving it from the view
      *  tree each time. */
     private FrameLayout rootLayout;
+    private Button logButton;
+    private View logOverlayView;
     private TextView statusView;
     private EditText hiddenInput;
     private Button kbToggle;
@@ -325,6 +330,11 @@ public class MainActivity extends Activity {
         aspectButton.setOnClickListener(v -> showAspectPicker());
         bar.addView(aspectButton);
         updateAspectButton();
+
+        logButton = new Button(this);
+        logButton.setText("📋");
+        logButton.setOnClickListener(v -> showSessionLog());
+        bar.addView(logButton);
 
         hudToggle = new Button(this);
         hudToggle.setText("📊");
@@ -600,6 +610,104 @@ public class MainActivity extends Activity {
      * Shown automatically when nothing is saved yet, and reachable from the
      * sidebar at any time to switch machines.
      */
+    /**
+     * Shows the running session log.
+     *
+     * <p>Reachable in one tap from the main screen on purpose. Both failures
+     * that motivated this ("no share prompt appeared", "connected but the
+     * screen stayed black") are states where the app looks idle and the only
+     * evidence lives on the laptop, so the evidence has to be brought to
+     * whoever is actually looking at the phone.
+     */
+    private void showSessionLog() {
+        if (logOverlayView != null) {
+            dismissSessionLog();
+            return;
+        }
+        LinearLayout overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setBackgroundColor(0xEE000000);
+        int pad = (int) (12 * getResources().getDisplayMetrics().density);
+        overlay.setPadding(pad, pad, pad, pad);
+
+        TextView title = new TextView(this);
+        title.setText("Session log");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(20);
+        overlay.addView(title);
+
+        TextView body = new TextView(this);
+        body.setTextColor(Color.LTGRAY);
+        body.setTextSize(11);
+        body.setTypeface(android.graphics.Typeface.MONOSPACE);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+        overlay.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        Runnable refresh = () -> {
+            SpannableStringBuilder sb = new SpannableStringBuilder();
+            for (SessionLog.Entry e : SessionLog.snapshot()) {
+                int start = sb.length();
+                sb.append(SessionLog.stamp(e)).append("  [").append(e.stage).append("] ")
+                  .append(e.message).append("\n");
+                int color;
+                switch (e.level) {
+                    case ERROR: color = 0xFFFF6B6B; break;
+                    case WARN:  color = 0xFFFFD166; break;
+                    case GOOD:  color = 0xFF7BE495; break;
+                    default:    color = Color.LTGRAY;
+                }
+                sb.setSpan(new ForegroundColorSpan(color), start, sb.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            if (sb.length() == 0) {
+                sb.append("Nothing logged yet. Tap ⟳ Reconnect to start a connection.");
+            }
+            body.setText(sb);
+            scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+        };
+        refresh.run();
+        // Follows the session live: the interesting moments (waiting on the
+        // share dialog, a stage failing) happen while this is already open.
+        SessionLog.setListener(() -> runOnUiThread(refresh));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.HORIZONTAL);
+
+        Button copy = new Button(this);
+        copy.setText("Copy");
+        copy.setOnClickListener(v -> {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                        "palmtop session log", SessionLog.asText()));
+                android.widget.Toast.makeText(this, "Log copied", android.widget.Toast.LENGTH_SHORT)
+                        .show();
+            }
+        });
+        buttons.addView(copy);
+
+        Button close = new Button(this);
+        close.setText("Close");
+        close.setOnClickListener(v -> dismissSessionLog());
+        buttons.addView(close);
+        overlay.addView(buttons);
+
+        logOverlayView = overlay;
+        rootLayout.addView(overlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    private void dismissSessionLog() {
+        SessionLog.setListener(null);
+        if (logOverlayView != null) {
+            rootLayout.removeView(logOverlayView);
+            logOverlayView = null;
+        }
+    }
+
     private void showDeviceListOverlay(FrameLayout root) {
         LinearLayout overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.VERTICAL);
@@ -941,6 +1049,8 @@ public class MainActivity extends Activity {
         if (surfaceHolder == null || host == null) return;
         teardown();
         int myGeneration = ++generation;
+        SessionLog.startSession();
+        SessionLog.info("net", "connecting to " + host + ":" + port);
         statusView.setTextColor(Color.GREEN);
         statusView.setText("connecting to " + host + ":" + port + " ...");
         new Thread(() -> runNetwork(surfaceHolder, myGeneration), "palmtop-net").start();
@@ -1206,11 +1316,14 @@ public class MainActivity extends Activity {
                     latency.onPong(msg.tClientUs, msg.tHostRecvUs, msg.tHostSendUs, nowUs());
                 } else if (msg.tag == Protocol.TAG_VIDEO_CONFIG) {
                     handleVideoConfigChange(msg, holder);
+                } else if (msg.tag == Protocol.TAG_STATUS) {
+                    handleStatus(msg);
                 }
             }
             writer.interrupt();
         } catch (Exception e) {
             Log.e(TAG, "network thread failed", e);
+            SessionLog.error("net", String.valueOf(e.getMessage() != null ? e.getMessage() : e));
             if (generation == myGeneration) {
                 runOnUiThread(() -> {
                     statusView.setTextColor(Color.RED);
@@ -1228,7 +1341,7 @@ public class MainActivity extends Activity {
     private void performHandshake(DataInputStream rawIn, OutputStream rawOut) throws Exception {
         byte[] hostPubKey = hexDecode(pubkey);
         noise = NoiseTransport.handshakeInitiator(rawIn, rawOut, hostPubKey);
-        Log.i(TAG, "noise handshake ok");
+        SessionLog.good("crypto", "encrypted channel established");
 
         DeviceProfile profile = deviceProfile;
         if (profile == null) {
@@ -1242,19 +1355,65 @@ public class MainActivity extends Activity {
         Protocol.Received ack = recvEncrypted(rawIn);
         if (ack == null || ack.tag != Protocol.TAG_HELLO_ACK || !ack.ok) {
             String reason = ack != null ? ack.reason : "connection closed during handshake";
+            SessionLog.error("pairing", reason);
             throw new IOException("handshake rejected: " + reason);
         }
-        Log.i(TAG, "handshake ok");
+        SessionLog.good("pairing", "accepted by the laptop");
     }
 
-    /** The first message after a successful handshake is always VideoConfig
-     * -- anything else means a protocol mismatch or a broken connection. */
+    /**
+     * Waits for the stream's opening VideoConfig, surfacing any Status the
+     * host reports while we wait.
+     *
+     * <p>This deliberately is not "read one message and require VideoConfig".
+     * Between the handshake and the first frame, the host has to get the
+     * screen-share dialog approved by a human standing at the laptop, and that
+     * can take as long as it takes. A v5 host narrates that wait (see
+     * palmtop-proto's Status), which is the difference between a phone that
+     * looks frozen and one that says "approve the dialog on the laptop" --
+     * exactly the confusion reported when the prompt appeared to never come.
+     *
+     * <p>A failing Status ends the wait immediately with the host's own
+     * explanation, rather than leaving the connection hanging until something
+     * eventually times out with a generic error.
+     */
     private Protocol.Received readInitialVideoConfig(DataInputStream rawIn) throws Exception {
-        Protocol.Received cfg = recvEncrypted(rawIn);
-        if (cfg == null || cfg.tag != Protocol.TAG_VIDEO_CONFIG) {
-            throw new IOException("expected VideoConfig, got " + (cfg == null ? "EOF" : cfg.tag));
+        while (true) {
+            Protocol.Received msg = recvEncrypted(rawIn);
+            if (msg == null) {
+                throw new IOException("host closed the connection before the stream started");
+            }
+            if (msg.tag == Protocol.TAG_VIDEO_CONFIG) {
+                return msg;
+            }
+            if (msg.tag == Protocol.TAG_STATUS) {
+                handleStatus(msg);
+                if (!msg.ok) {
+                    throw new IOException(msg.detail);
+                }
+                continue;
+            }
+            // Anything else here really is out of order.
+            throw new IOException("expected VideoConfig, got tag " + msg.tag);
         }
-        return cfg;
+    }
+
+    /** Records a host Status in the session log and reflects the important
+     *  ones on screen, so the current state is visible without opening the
+     *  log at all. */
+    private void handleStatus(Protocol.Received msg) {
+        if (msg.ok) {
+            SessionLog.good(msg.stage, msg.detail);
+        } else {
+            SessionLog.error(msg.stage, msg.detail);
+        }
+        final boolean failed = !msg.ok;
+        final String detail = msg.detail;
+        runOnUiThread(() -> {
+            if (statusView == null) return;
+            statusView.setTextColor(failed ? Color.RED : Color.WHITE);
+            statusView.setText(failed ? ("ERROR: " + detail) : detail);
+        });
     }
 
     /** Records the stream's starting format, re-asserts the user's chosen

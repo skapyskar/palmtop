@@ -39,7 +39,40 @@ enum Outgoing {
     /// A `VideoConfig` announcing new stream dimensions. The writer discards
     /// any pending frame before sending it -- see [`encode::LatestEncoded::clear`].
     Reconfigure(Message),
+    /// Progress or failure from a thread that does not own the socket, so it
+    /// reaches the phone rather than only the host's log.
+    Status { stage: String, ok: bool, detail: String },
 }
+
+/// Reports a stage to the client, best-effort.
+///
+/// Failing to send a status must never be what ends a session: this is
+/// diagnostics, and diagnostics that can themselves take down the thing they
+/// are diagnosing are worse than none. Errors go to the host log and are
+/// otherwise swallowed.
+fn send_status(noise: &SharedNoise, stream: &mut TcpStream, stage: &str, ok: bool, detail: &str) {
+    if ok {
+        println!("[{stage}] {detail}");
+    } else {
+        eprintln!("[{stage}] FAILED: {detail}");
+    }
+    let msg = Message::Status {
+        stage: stage.to_string(),
+        ok,
+        detail: detail.to_string(),
+    };
+    if let Err(e) = send_encrypted(noise, stream, &msg) {
+        eprintln!("[net] could not send status to the client: {e:#}");
+    }
+}
+
+/// How long the stream may produce nothing before the client is told.
+///
+/// The "connected, approved, still black" report is exactly this state, and
+/// it previously lasted forever in silence. Generous enough not to fire on a
+/// slow first keyframe, short enough that nobody sits staring at a blank
+/// screen wondering whether to keep waiting.
+const FIRST_FRAME_GRACE: Duration = Duration::from_secs(8);
 
 /// Caps how much encoded video the kernel will hold on our behalf.
 ///
@@ -178,21 +211,66 @@ fn handle_client(
 
     let device_profile = handshake(&mut stream, &noise, &cfg.pairing.token)?;
 
+    // From here on, every failure is one the phone cannot otherwise see. The
+    // laptop's operator has journalctl; the person holding the phone has a
+    // blank screen and no way to tell "waiting for you to approve a dialog"
+    // apart from "the GPU cannot encode". Each stage therefore reports itself
+    // over the wire as well as to the log.
+    send_status(
+        &noise,
+        &mut stream,
+        "portal",
+        true,
+        "asking for screen-share permission -- approve the dialog on the laptop",
+    );
+
     // Deliberately does NOT drop the runtime after this call (it used to, and
     // that was a bug -- see main.rs). The portal's DBus connection lives
     // inside it and must stay up for as long as the PipeWire stream it
     // granted is in use, not just for the duration of the initial request.
-    let (node_id, fd, (width, height)) = rt.block_on(capture::request_screencast())?;
+    let (node_id, fd, (width, height)) = match rt.block_on(capture::request_screencast()) {
+        Ok(v) => v,
+        Err(e) => {
+            send_status(
+                &noise,
+                &mut stream,
+                "portal",
+                false,
+                &format!(
+                    "the laptop could not start screen sharing: {e:#}\n\
+                     Run `palmtopd --doctor` on the laptop for the specific cause."
+                ),
+            );
+            return Err(e).context("screen-share portal");
+        }
+    };
+    send_status(
+        &noise,
+        &mut stream,
+        "portal",
+        true,
+        &format!("screen sharing approved -- capturing {width}x{height}"),
+    );
     println!("[net] streaming {width}x{height} to client");
 
     let stop = Arc::new(AtomicBool::new(false));
     let slot = FrameSlot::new();
 
+    let (out_tx, out_rx) = mpsc::channel::<Outgoing>();
+
     let cap_handle = {
-        let (slot, stop) = (slot.clone(), stop.clone());
+        let (slot, stop, out_tx) = (slot.clone(), stop.clone(), out_tx.clone());
         thread::spawn(move || {
             if let Err(e) = capture::run(fd, node_id, slot, stop) {
                 eprintln!("[capture] {e:#}");
+                // Capture dying mid-session (the user revoked sharing, the
+                // compositor restarted) is otherwise indistinguishable on the
+                // phone from a frozen picture.
+                let _ = out_tx.send(Outgoing::Status {
+                    stage: "capture".to_string(),
+                    ok: false,
+                    detail: format!("screen capture stopped: {e:#}"),
+                });
             }
         })
     };
@@ -202,7 +280,6 @@ fn handle_client(
     // Survives mode changes; only the encoder feeding it is rebuilt.
     let latest_encoded = encode::LatestEncoded::new();
 
-    let (out_tx, out_rx) = mpsc::channel::<Outgoing>();
     let (mode_tx, mode_rx) = mpsc::channel::<crate::modes::Mode>();
 
     let mut mode = crate::modes::Mode::default();
@@ -219,16 +296,70 @@ fn handle_client(
     };
 
     let mut stage_stop = Arc::new(AtomicBool::new(false));
-    let mut stage = start_encode_stage(&ctx, &preset, stage_stop.clone())?;
+    let mut stage = match start_encode_stage(&ctx, &preset, stage_stop.clone()) {
+        Ok(stage) => stage,
+        Err(e) => {
+            send_status(
+                &noise,
+                &mut stream,
+                "encode",
+                false,
+                &format!(
+                    "the laptop could not start its video encoder: {e:#}\n\
+                     Run `palmtopd --doctor` on the laptop -- this is usually the GPU render \
+                     node being wrong, or ffmpeg missing."
+                ),
+            );
+            return Err(e).context("start encoder");
+        }
+    };
 
     let write_half = stream.try_clone().context("clone tcp stream for writer")?;
     let read_half = stream.try_clone().context("clone tcp stream for reader")?;
     let codec = cfg.encode.codec.clone();
 
+    // Watched by the no-frames watchdog below.
+    let sent_a_frame = Arc::new(AtomicBool::new(false));
+
     let writer_handle = {
-        let (stop, noise, latest_encoded) = (stop.clone(), noise.clone(), latest_encoded.clone());
-        thread::spawn(move || run_writer(write_half, noise, latest_encoded, out_rx, stop))
+        let (stop, noise, latest_encoded, sent_a_frame) =
+            (stop.clone(), noise.clone(), latest_encoded.clone(), sent_a_frame.clone());
+        thread::spawn(move || {
+            run_writer(write_half, noise, latest_encoded, out_rx, stop, sent_a_frame)
+        })
     };
+
+    // "Connected, permission granted, screen still black" was a real report
+    // with no signal attached to it whatsoever. If nothing has reached the
+    // phone by now, say so on the phone -- the encoder can die at any point
+    // after starting cleanly (a wrong GPU node fails exactly this way), and
+    // silence is the one response that leaves nobody able to act.
+    {
+        let (out_tx, stop, sent_a_frame) = (out_tx.clone(), stop.clone(), sent_a_frame.clone());
+        thread::spawn(move || {
+            let deadline = std::time::Instant::now() + FIRST_FRAME_GRACE;
+            while std::time::Instant::now() < deadline {
+                if stop.load(Ordering::Relaxed) || sent_a_frame.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            if sent_a_frame.load(Ordering::Relaxed) || stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = out_tx.send(Outgoing::Status {
+                stage: "stream".to_string(),
+                ok: false,
+                detail: format!(
+                    "no video has arrived after {}s, although the connection is fine. The \
+                     laptop is capturing but producing no encoded frames -- run \
+                     `palmtopd --doctor` on it; a GPU render node that cannot encode is the \
+                     usual cause.",
+                    FIRST_FRAME_GRACE.as_secs()
+                ),
+            });
+        });
+    }
 
     // The very first VideoConfig goes through the same path a mode change
     // does, so there is exactly one code path that announces stream
@@ -245,6 +376,14 @@ fn handle_client(
     };
     let _ = out_tx.send(announce(mode, &preset));
     println!("[net] streaming in {} mode ({}x{}@{})", mode.name(), preset.width, preset.height, preset.fps);
+    let _ = out_tx.send(Outgoing::Status {
+        stage: "encode".to_string(),
+        ok: true,
+        detail: format!(
+            "encoding {}x{}@{} on {} ({} mode)",
+            preset.width, preset.height, preset.fps, render_node, mode.name()
+        ),
+    });
 
     let reader_handle = {
         let (stop, noise, input_tx, out_tx) =
@@ -432,6 +571,7 @@ fn run_writer(
     latest_encoded: Arc<encode::LatestEncoded>,
     out_rx: mpsc::Receiver<Outgoing>,
     stop: Arc<AtomicBool>,
+    sent_a_frame: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         // Control messages are rare and latency-insensitive relative to video
@@ -457,6 +597,7 @@ fn run_writer(
                     latest_encoded.clear();
                     msg
                 }
+                Outgoing::Status { stage, ok, detail } => Message::Status { stage, ok, detail },
             };
             if send_encrypted(&noise, &mut write_half, &msg).is_err() {
                 return;
@@ -473,6 +614,9 @@ fn run_writer(
             if send_encrypted(&noise, &mut write_half, &msg).is_err() {
                 return;
             }
+            // Set after the send succeeds, so the watchdog's question is
+            // "did a frame really reach the phone", not "did we produce one".
+            sent_a_frame.store(true, Ordering::Relaxed);
         }
     }
 }

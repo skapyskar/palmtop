@@ -131,6 +131,19 @@ else
   warn "palmtopd did not start. Check:  journalctl --user -u palmtopd -n 40"
 fi
 
+# --- 4b. check it can actually work ------------------------------------------
+# Run here rather than left for the user to discover. Everything this catches
+# (no portal backend, a GPU node that cannot encode) otherwise presents much
+# later as a phone that connects and then shows a black screen, which is a far
+# worse moment to start diagnosing than during install.
+say ""
+say "Checking this machine can capture and encode..."
+PALMTOP_CONFIG_DIR="$CONFIG_DIR" "$BIN_DIR/palmtopd" --doctor || {
+  warn "Some checks failed -- see above. Pairing will still work, but the phone may"
+  warn "not get a picture until those are fixed. Re-run any time with:"
+  warn "  palmtopd --doctor"
+}
+
 # --- 5. pair -----------------------------------------------------------------
 if [ "$RELEASE_MODE" = "1" ]; then
   pair_usb="./pair-usb.sh"

@@ -130,7 +130,8 @@ pub fn run(rx: Receiver<Message>) -> Result<()> {
             }
             Message::Ping { .. } | Message::Pong { .. } | Message::Hello { .. }
             | Message::HelloAck { .. } | Message::VideoConfig { .. }
-            | Message::VideoFrame { .. } | Message::SetMode { .. } => {
+            | Message::VideoFrame { .. } | Message::SetMode { .. }
+            | Message::Status { .. } => {
                 // Not input; the network layer handles these before forwarding here.
             }
         }

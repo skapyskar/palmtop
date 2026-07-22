@@ -25,7 +25,10 @@ pub use noise::NoiseTransport;
 /// v4: `Hello` carries a [`DeviceProfile`], so the host tunes the stream to
 /// whatever phone actually connected instead of relying on hand-written
 /// per-device config that could never ship to strangers.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// v5: `Status` lets the host narrate what it is doing and say plainly when a
+/// stage fails, so a session that dies after `HelloAck` reports why on the
+/// phone instead of presenting as an indefinite blank screen.
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Cap on a single message payload. Generous for 4K video frames, small enough
 /// to reject clearly-corrupt length headers instead of trying to allocate them.
@@ -200,6 +203,23 @@ pub enum Message {
     /// semantics used by the proven wlr-input spike): positive = down/right.
     Scroll { dx: f32, dy: f32 },
 
+    /// Host -> client: a running account of what the host is doing, so a
+    /// session that fails partway through says so instead of just going quiet.
+    ///
+    /// This exists because every failure after `HelloAck` used to be invisible
+    /// from the phone. The host would request the screen-share portal, fail to
+    /// start its encoder, or have its capture stream torn down -- and in every
+    /// case the phone showed the same blank screen with no indication whether
+    /// it was waiting on a human to approve a dialog, waiting on a broken GPU,
+    /// or simply not connected. The operator could read `journalctl` on the
+    /// laptop; the person holding the phone could not.
+    ///
+    /// `stage` is a short stable identifier (`portal`, `capture`, `encode`,
+    /// `stream`), suitable for the client to key off. `detail` is
+    /// human-readable and may change freely. `ok=false` means this stage
+    /// failed; the session usually ends immediately after.
+    Status { stage: String, ok: bool, detail: String },
+
     /// Client -> host: a single key by evdev keycode, for keys the client can
     /// map itself (letters, digits, common punctuation, arrows, modifiers).
     Key { evdev_code: u32, pressed: bool, modifiers: Modifiers },
@@ -243,6 +263,7 @@ enum Tag {
     Ping = 11,
     Pong = 12,
     SetMode = 13,
+    Status = 14,
 }
 
 impl Message {
@@ -332,6 +353,12 @@ impl Message {
                 payload.extend_from_slice(&t_host_recv_us.to_be_bytes());
                 payload.extend_from_slice(&t_host_send_us.to_be_bytes());
                 Tag::Pong
+            }
+            Message::Status { stage, ok, detail } => {
+                write_str(&mut payload, stage);
+                payload.push(*ok as u8);
+                write_str(&mut payload, detail);
+                Tag::Status
             }
         };
 
@@ -434,6 +461,11 @@ impl Message {
                 t_client_us: read_u64(&mut p)?,
                 t_host_recv_us: read_u64(&mut p)?,
                 t_host_send_us: read_u64(&mut p)?,
+            },
+            t if t == Tag::Status as u8 => Message::Status {
+                stage: read_str(&mut p)?,
+                ok: read_u8(&mut p)? != 0,
+                detail: read_str(&mut p)?,
             },
             other => bail!("unknown message tag {other}"),
         };
@@ -550,6 +582,39 @@ mod tests {
     }
 
     #[test]
+    fn status_roundtrips_both_outcomes() {
+        // The failure case carries the message a user will actually read on
+        // their phone, so it must survive the wire intact -- including the
+        // newlines and punctuation a diagnostic explanation needs.
+        match roundtrip(Message::Status {
+            stage: "encode".to_string(),
+            ok: false,
+            detail: "ffmpeg exited immediately:\n  cannot open /dev/dri/renderD128".to_string(),
+        }) {
+            Message::Status { stage, ok, detail } => {
+                assert_eq!(stage, "encode");
+                assert!(!ok);
+                assert!(detail.contains("renderD128"));
+                assert!(detail.contains('\n'));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        match roundtrip(Message::Status {
+            stage: "portal".to_string(),
+            ok: true,
+            detail: String::new(),
+        }) {
+            Message::Status { stage, ok, detail } => {
+                assert_eq!(stage, "portal");
+                assert!(ok);
+                assert!(detail.is_empty());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn video_frame_roundtrips_bytes_exactly() {
         let data = vec![0u8, 1, 2, 255, 254, 0, 0, 0];
         match roundtrip(Message::VideoFrame { keyframe: true, capture_us: 0, data: data.clone() }) {
@@ -648,7 +713,7 @@ mod tests {
     /// handshake, and a silent bump on one side only would present as an
     /// unexplained connection refusal.
     #[test]
-    fn protocol_version_is_four() {
-        assert_eq!(PROTOCOL_VERSION, 4);
+    fn protocol_version_is_five() {
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 }
