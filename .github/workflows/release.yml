@@ -103,13 +103,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # palmtopd links against PipeWire and the portal stack, so the build
-      # needs their headers even though CI can never exercise the capture
-      # path itself (there is no compositor on a runner).
+      # palmtopd links against PipeWire, the portal stack, and libxkbcommon
+      # (keyboard layout handling for the wlr virtual-keyboard input path),
+      # so the build needs their headers even though CI can never exercise
+      # the capture/input paths themselves (there is no compositor on a
+      # runner). Found from the v0.1.0 release run's own failure log
+      # (`unable to find library -lxkbcommon`) -- this list was missing
+      # libxkbcommon-dev.
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libclang-dev pkg-config
+          sudo apt-get install -y libpipewire-0.3-dev libclang-dev libxkbcommon-dev pkg-config
 
       - name: Tests
         run: cargo test --workspace
