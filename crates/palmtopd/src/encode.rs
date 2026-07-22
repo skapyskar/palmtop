@@ -107,6 +107,7 @@ impl TimestampFifo {
 /// ask for something smaller, in which case VA-API scales on the GPU.
 pub fn spawn(
     cfg: &palmtop_config::HostConfig,
+    render_node: &str,
     preset: &crate::modes::Preset,
     src_width: u32,
     src_height: u32,
@@ -126,7 +127,7 @@ pub fn spawn(
 
     Command::new("ffmpeg")
         .args(["-y", "-hide_banner", "-loglevel", "error", "-init_hw_device"])
-        .arg(format!("vaapi=va:{}", cfg.gpu.vaapi_render_node))
+        .arg(format!("vaapi=va:{render_node}"))
         .args(["-f", "rawvideo", "-pix_fmt", "bgra", "-s"])
         .arg(format!("{src_width}x{src_height}"))
         .args(["-r", &preset.fps.to_string(), "-i", "pipe:0"])

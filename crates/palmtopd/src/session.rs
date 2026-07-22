@@ -94,16 +94,27 @@ struct EncodeStage {
     reader: thread::JoinHandle<()>,
 }
 
-fn start_encode_stage(
-    cfg: &HostConfig,
-    preset: &crate::modes::Preset,
+/// The parts of a session that stay fixed across mode changes. Grouped so
+/// restarting the encoder reads as "same session, new preset" at the call
+/// site, rather than as an eight-argument call whose ordering has to be
+/// checked against the signature every time.
+struct StageContext<'a> {
+    cfg: &'a HostConfig,
+    render_node: &'a str,
     src_width: u32,
     src_height: u32,
     slot: Arc<FrameSlot>,
     latest_encoded: Arc<encode::LatestEncoded>,
+}
+
+fn start_encode_stage(
+    ctx: &StageContext<'_>,
+    preset: &crate::modes::Preset,
     stage_stop: Arc<AtomicBool>,
 ) -> Result<EncodeStage> {
-    let mut child = encode::spawn(cfg, preset, src_width, src_height)?;
+    let (slot, latest_encoded) = (ctx.slot.clone(), ctx.latest_encoded.clone());
+    let mut child =
+        encode::spawn(ctx.cfg, ctx.render_node, preset, ctx.src_width, ctx.src_height)?;
     let ffmpeg_stdin = child.stdin.take().context("ffmpeg stdin")?;
     let ffmpeg_stdout = child.stdout.take().context("ffmpeg stdout")?;
 
@@ -130,7 +141,12 @@ fn stop_encode_stage(stage: EncodeStage, stage_stop: &AtomicBool) {
     let _ = stage.reader.join(); // stdout EOF once ffmpeg has gone
 }
 
-pub fn run(cfg: HostConfig, input_tx: Sender<Message>, rt: &tokio::runtime::Runtime) -> Result<()> {
+pub fn run(
+    cfg: HostConfig,
+    render_node: String,
+    input_tx: Sender<Message>,
+    rt: &tokio::runtime::Runtime,
+) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.host.port))
         .with_context(|| format!("bind 0.0.0.0:{}", cfg.host.port))?;
     println!("[net] listening on 0.0.0.0:{}", cfg.host.port);
@@ -138,7 +154,7 @@ pub fn run(cfg: HostConfig, input_tx: Sender<Message>, rt: &tokio::runtime::Runt
     loop {
         let (stream, addr) = listener.accept()?;
         println!("[net] client connected: {addr}");
-        if let Err(e) = handle_client(stream, &cfg, &input_tx, rt) {
+        if let Err(e) = handle_client(stream, &cfg, &render_node, &input_tx, rt) {
             eprintln!("[net] session ended: {e:#}");
         }
         println!("[net] ready for next client");
@@ -148,6 +164,7 @@ pub fn run(cfg: HostConfig, input_tx: Sender<Message>, rt: &tokio::runtime::Runt
 fn handle_client(
     mut stream: TcpStream,
     cfg: &HostConfig,
+    render_node: &str,
     input_tx: &Sender<Message>,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
@@ -192,10 +209,17 @@ fn handle_client(
     let mut preset = mode.preset().clamped_to(&device_profile);
     set_send_buffer(&stream, preset.sndbuf_bytes);
 
+    let ctx = StageContext {
+        cfg,
+        render_node,
+        src_width: width,
+        src_height: height,
+        slot: slot.clone(),
+        latest_encoded: latest_encoded.clone(),
+    };
+
     let mut stage_stop = Arc::new(AtomicBool::new(false));
-    let mut stage = start_encode_stage(
-        cfg, &preset, width, height, slot.clone(), latest_encoded.clone(), stage_stop.clone(),
-    )?;
+    let mut stage = start_encode_stage(&ctx, &preset, stage_stop.clone())?;
 
     let write_half = stream.try_clone().context("clone tcp stream for writer")?;
     let read_half = stream.try_clone().context("clone tcp stream for reader")?;
@@ -243,10 +267,7 @@ fn handle_client(
                 preset = mode.preset().clamped_to(&device_profile);
                 set_send_buffer(&stream, preset.sndbuf_bytes);
                 stage_stop = Arc::new(AtomicBool::new(false));
-                stage = start_encode_stage(
-                    cfg, &preset, width, height, slot.clone(), latest_encoded.clone(),
-                    stage_stop.clone(),
-                )?;
+                stage = start_encode_stage(&ctx, &preset, stage_stop.clone())?;
                 let _ = out_tx.send(announce(mode, &preset));
                 println!(
                     "[net] switched to {} mode ({}x{}@{}, cap {}kb/s)",

@@ -181,6 +181,92 @@ impl HostConfig {
             "could not auto-detect host IP -- set `ip` explicitly in config/host.toml",
         )
     }
+
+    /// The DRM render node to hardware-encode on: the configured one if it can
+    /// actually encode, otherwise the first node that can.
+    ///
+    /// The template's `/dev/dri/renderD128` is a guess, and on hybrid-GPU
+    /// laptops it is frequently the wrong guess -- the nodes enumerate in an
+    /// order that depends on which driver bound first, which is not stable
+    /// across machines. Getting it wrong used to be silent and awful to
+    /// diagnose: ffmpeg fails to initialise VA-API and exits immediately, the
+    /// capture pipeline keeps running, and the phone sits on a blank screen
+    /// forever with no error at either end. Probing turns that into either a
+    /// working stream or a loud, specific message.
+    pub fn resolved_render_node(&self) -> Result<String> {
+        let configured = self.gpu.vaapi_render_node.trim();
+        if !configured.is_empty() && node_can_encode(configured, &self.encode.codec) {
+            return Ok(configured.to_string());
+        }
+
+        let candidates = render_nodes();
+        let working: Vec<String> = candidates
+            .iter()
+            .filter(|n| node_can_encode(n, &self.encode.codec))
+            .cloned()
+            .collect();
+
+        match working.first() {
+            Some(node) => {
+                if configured.is_empty() {
+                    eprintln!("[gpu] auto-detected render node: {node}");
+                } else {
+                    eprintln!(
+                        "[gpu] configured render node {configured} cannot encode {} -- using {node} \
+                         instead. Set `vaapi_render_node = \"{node}\"` in host.toml to silence this.",
+                        self.encode.codec
+                    );
+                }
+                Ok(node.clone())
+            }
+            None if candidates.is_empty() => bail!(
+                "no DRM render nodes found under /dev/dri -- this machine has no GPU available \
+                 for hardware encode. Run `palmtopd --doctor` for details."
+            ),
+            None => bail!(
+                "none of the available render nodes ({}) can hardware-encode {}. Run \
+                 `palmtopd --doctor` for the full diagnosis and how to fix it.",
+                candidates.join(", "),
+                self.encode.codec
+            ),
+        }
+    }
+}
+
+/// Every DRM render node on this machine, sorted for a stable preference order.
+pub fn render_nodes() -> Vec<String> {
+    let mut nodes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("renderD") {
+                nodes.push(format!("/dev/dri/{name}"));
+            }
+        }
+    }
+    nodes.sort();
+    nodes
+}
+
+/// Whether `node` can really hardware-encode `codec`, established by encoding
+/// through it rather than by inspecting anything. Costs a few hundred
+/// milliseconds once at startup, which is a fair price for not shipping a
+/// stream that silently produces no frames.
+pub fn node_can_encode(node: &str, codec: &str) -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-init_hw_device"])
+        .arg(format!("vaapi=va:{node}"))
+        .args([
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
+            "-vf", "format=nv12,hwupload",
+            "-c:v", codec,
+            "-f", "null", "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------- device

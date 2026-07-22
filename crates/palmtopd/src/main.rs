@@ -1,4 +1,5 @@
 mod capture;
+mod doctor;
 mod encode;
 mod input;
 mod modes;
@@ -11,11 +12,32 @@ use std::thread;
 use anyhow::Result;
 
 fn main() -> Result<()> {
-    let cfg = palmtop_config::HostConfig::load()?;
+    // Loaded before the flag check so --doctor can report on the real config,
+    // but tolerated as absent: diagnosing a machine whose config is broken is
+    // exactly when the diagnostics are most useful, so a load failure must not
+    // stop them running.
+    let cfg = palmtop_config::HostConfig::load();
+
+    if std::env::args().any(|a| a == "--doctor") {
+        if let Err(e) = &cfg {
+            eprintln!("[doctor] configuration could not be loaded: {e:#}\n");
+        }
+        let healthy = doctor::run(cfg.as_ref().ok())?;
+        std::process::exit(if healthy { 0 } else { 1 });
+    }
+
+    let cfg = cfg?;
     println!(
         "[palmtopd] vaapi={} codec={} qp={} fps={} port={}",
         cfg.gpu.vaapi_render_node, cfg.encode.codec, cfg.encode.qp, cfg.encode.fps, cfg.host.port
     );
+
+    // Probed once at startup rather than per session: it costs a few hundred
+    // milliseconds, and finding out the GPU cannot encode is something the
+    // operator should learn from the daemon's own startup log, not from a
+    // phone that connects to a blank screen ten minutes later.
+    let render_node = cfg.resolved_render_node()?;
+    println!("[gpu] encoding on {render_node}");
 
     // Kept alive for the daemon's lifetime -- dropping it withdraws the
     // mDNS registration.
@@ -52,5 +74,5 @@ fn main() -> Result<()> {
     // DBus as the client going away and tearing down the still-in-use
     // PipeWire stream. See session.rs for where this used to happen.
     let rt = tokio::runtime::Runtime::new()?;
-    session::run(cfg, input_tx, &rt)
+    session::run(cfg, render_node, input_tx, &rt)
 }
