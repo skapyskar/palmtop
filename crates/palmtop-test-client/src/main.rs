@@ -1,18 +1,23 @@
 //! Minimal test client for `palmtopd`.
 //!
 //! Not the Android client -- this exists to validate the host's session logic
-//! (handshake, continuous live video streaming, input round-trip) in
-//! isolation, on this machine, before the Android side can be blamed for or
-//! credited with anything. Connects, receives real live video for a few
-//! seconds, writes it to disk for `ffprobe`/`ffmpeg` to validate as a real
-//! decodable stream, then exercises the input path (move, click, type).
+//! (Noise handshake, pairing, continuous live video streaming, input
+//! round-trip) in isolation, on this machine, before the Android side can be
+//! blamed for or credited with anything. Connects, receives real live video
+//! for a few seconds, writes it to disk for `ffprobe`/`ffmpeg` to validate as
+//! a real decodable stream, then exercises the input path (move, click, type).
+//!
+//! Reads the host's Noise public key straight out of `config/host.toml`,
+//! which only works because this runs *on* the host machine -- a stand-in
+//! for "the QR/mDNS-sourced pubkey the phone would otherwise TOFU-pin" (see
+//! palmtopd/src/pairing.rs for what that trust model does and doesn't cover).
 
 use std::io::{BufWriter, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use palmtop_proto::{Button, Message, Modifiers, PROTOCOL_VERSION};
+use palmtop_proto::{noise, Button, Message, Modifiers, NoiseTransport, PROTOCOL_VERSION};
 
 fn main() -> Result<()> {
     let cfg = palmtop_config::HostConfig::load()?;
@@ -21,21 +26,77 @@ fn main() -> Result<()> {
     let mut stream = TcpStream::connect(&addr).with_context(|| format!("connect {addr}"))?;
     stream.set_nodelay(true).ok();
 
-    Message::Hello { protocol_version: PROTOCOL_VERSION, token: cfg.pairing.token.clone() }
-        .write_to(&mut stream)?;
-    match Message::read_from(&mut stream)?.context("connection closed during handshake")? {
+    let host_pubkey = noise::from_hex(&cfg.pairing.noise_public_key)
+        .context("decode noise_public_key from config/host.toml")?;
+    let mut transport = NoiseTransport::handshake_initiator(&mut stream, &host_pubkey)
+        .context("noise handshake (initiator)")?;
+    println!("[test-client] noise handshake ok");
+
+    send(&mut transport, &mut stream, &Message::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        token: cfg.pairing.token.clone(),
+    })?;
+    match recv(&mut transport, &mut stream)?.context("connection closed during handshake")? {
         Message::HelloAck { ok: true, .. } => println!("[test-client] handshake ok"),
         Message::HelloAck { ok: false, reason } => bail!("host rejected handshake: {reason}"),
         other => bail!("expected HelloAck, got {other:?}"),
     }
 
-    let (width, height, fps) = match Message::read_from(&mut stream)?.context("connection closed before VideoConfig")? {
-        Message::VideoConfig { codec, width, height, fps } => {
-            println!("[test-client] video config: {codec} {width}x{height} @{fps}fps");
+    let (width, height, fps) = match recv(&mut transport, &mut stream)?
+        .context("connection closed before VideoConfig")?
+    {
+        Message::VideoConfig { codec, width, height, fps, mode, drop_budget_ms } => {
+            println!(
+                "[test-client] video config: {codec} {width}x{height} @{fps}fps \
+                 (mode {mode}, drop budget {drop_budget_ms}ms)"
+            );
             (width, height, fps)
         }
         other => bail!("expected VideoConfig, got {other:?}"),
     };
+
+    // Exercise a mode switch before collecting frames. This is the riskiest
+    // path on the host -- it tears down and rebuilds the whole encode stage
+    // mid-session -- and doing it here means a regression shows up in a
+    // 20-second terminal run instead of only when someone has a phone in hand.
+    // Sync mode is the useful one to assert on because its 720p differs from
+    // the 1080p default, so a resolution that fails to change is a visible
+    // failure rather than a silent no-op.
+    if std::env::args().any(|a| a == "--test-mode-switch") {
+        println!("[test-client] requesting sync mode (expect 1280x720)");
+        send(&mut transport, &mut stream, &Message::SetMode { mode: 0 })?;
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut switched = false;
+        while Instant::now() < deadline && !switched {
+            stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
+            match recv(&mut transport, &mut stream) {
+                Ok(Some(Message::VideoConfig { width, height, fps, mode, drop_budget_ms, .. })) => {
+                    println!(
+                        "[test-client] mode switch -> {width}x{height} @{fps}fps \
+                         (mode {mode}, drop budget {drop_budget_ms}ms)"
+                    );
+                    if (width, height) != (1280, 720) {
+                        bail!("expected 1280x720 after switching to sync mode, got {width}x{height}");
+                    }
+                    if mode != 0 {
+                        bail!("host reported mode {mode} after a sync-mode request");
+                    }
+                    switched = true;
+                }
+                // Frames from the old encoder may still be in flight; they are
+                // expected and harmless before the new config arrives.
+                Ok(Some(_)) => {}
+                Ok(None) => bail!("host closed the connection during the mode switch"),
+                Err(e) if e.to_string().contains("timed out") => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !switched {
+            bail!("host never sent a new VideoConfig after SetMode");
+        }
+        println!("[test-client] mode switch ok");
+    }
 
     // Collect a few seconds of real live frames.
     let out_path = std::env::temp_dir().join("palmtop-test-client-capture.h264");
@@ -49,8 +110,8 @@ fn main() -> Result<()> {
     // side of the session only sends video, so blocking reads here are fine.
     while Instant::now() < deadline {
         stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
-        match Message::read_from(&mut stream) {
-            Ok(Some(Message::VideoFrame { keyframe, data })) => {
+        match recv(&mut transport, &mut stream) {
+            Ok(Some(Message::VideoFrame { keyframe, data, .. })) => {
                 if first_keyframe.is_none() {
                     first_keyframe = Some(keyframe);
                 }
@@ -64,8 +125,11 @@ fn main() -> Result<()> {
                 break;
             }
             Err(e) => {
-                // Read timeout is expected/harmless here; anything else is real.
-                if !e.to_string().to_lowercase().contains("timed out") {
+                // Read timeout is expected/harmless here; anything else is
+                // real. `{e:#}` (full anyhow cause chain) is needed to still
+                // see "timed out" now that the read is wrapped in a couple
+                // of `.context()` layers inside NoiseTransport::recv.
+                if !format!("{e:#}").to_lowercase().contains("timed out") {
                     println!("[test-client] read error: {e:#}");
                 }
             }
@@ -89,16 +153,35 @@ fn main() -> Result<()> {
 
     // Exercise the input path: move to center, click, type 'h'.
     println!("[test-client] sending input: move -> click -> key 'h'");
-    Message::PointerMotionAbsolute { x: 0.5, y: 0.5 }.write_to(&mut stream)?;
-    Message::PointerButton { button: Button::Left, pressed: true }.write_to(&mut stream)?;
-    Message::PointerButton { button: Button::Left, pressed: false }.write_to(&mut stream)?;
+    send(&mut transport, &mut stream, &Message::PointerMotionAbsolute { x: 0.5, y: 0.5 })?;
+    send(&mut transport, &mut stream, &Message::PointerButton { button: Button::Left, pressed: true })?;
+    send(&mut transport, &mut stream, &Message::PointerButton { button: Button::Left, pressed: false })?;
     const KEY_H: u32 = 35; // evdev keycode, matches spike-wlr-input
-    Message::Key { evdev_code: KEY_H, pressed: true, modifiers: Modifiers::NONE }
-        .write_to(&mut stream)?;
-    Message::Key { evdev_code: KEY_H, pressed: false, modifiers: Modifiers::NONE }
-        .write_to(&mut stream)?;
+    send(&mut transport, &mut stream, &Message::Key {
+        evdev_code: KEY_H,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+    })?;
+    send(&mut transport, &mut stream, &Message::Key {
+        evdev_code: KEY_H,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    })?;
 
     std::thread::sleep(Duration::from_millis(300));
     println!("[test-client] done. Expected resolution: {width}x{height} @{fps}fps");
     Ok(())
+}
+
+fn send(transport: &mut NoiseTransport, stream: &mut TcpStream, msg: &Message) -> Result<()> {
+    let mut buf = Vec::new();
+    msg.write_to(&mut buf)?;
+    transport.send(stream, &buf)
+}
+
+fn recv(transport: &mut NoiseTransport, stream: &mut TcpStream) -> Result<Option<Message>> {
+    match transport.recv(stream)? {
+        Some(bytes) => Ok(Message::read_from(&mut &bytes[..])?),
+        None => Ok(None),
+    }
 }

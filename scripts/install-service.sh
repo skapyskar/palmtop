@@ -41,7 +41,11 @@ sed -e "s|__PALMTOPD_BIN__|$BIN|g" -e "s|__PALMTOP_REPO__|$REPO_ROOT|g" \
 
 echo "[..] installed $UNIT_DIR/$UNIT_NAME"
 systemctl --user daemon-reload
-systemctl --user enable --now "$UNIT_NAME"
+systemctl --user enable "$UNIT_NAME"
+# `enable --now`/`start` are no-ops on an already-active unit, which silently
+# left a stale binary running after a rebuild here more than once -- restart
+# unconditionally so a freshly built binary always actually takes effect.
+systemctl --user restart "$UNIT_NAME"
 
 sleep 1
 echo "[..] status:"

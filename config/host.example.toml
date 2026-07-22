@@ -26,3 +26,9 @@ fps   = 30
 # control loop (as opposed to e.g. video export, where higher values trade
 # latency for better compression efficiency/throughput).
 async_depth = 1
+
+# [pairing] is NOT listed here on purpose -- palmtopd generates it itself on
+# first run (pairing token + a static Noise X25519 keypair for transport
+# encryption) and appends it to this file. Never hand-edit those values;
+# regenerating them locks out every client that already paired using the old
+# ones. See palmtop-proto::noise and palmtopd/src/pairing.rs.

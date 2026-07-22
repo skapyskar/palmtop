@@ -11,10 +11,18 @@ use std::io::{self, Read, Write};
 
 use anyhow::{bail, Context, Result};
 
+pub mod noise;
+pub use noise::NoiseTransport;
+
 /// Bumped on any wire-incompatible change. `Hello` carries this so a version
 /// mismatch is a clean refusal (plan §9 "version skew") rather than garbage bytes.
 /// v2 added the pairing `token` field to `Hello`.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// v3: `Ping`/`Pong` carry timestamps -- both the keepalive plan §9 wanted
+/// (v2 defined these messages but neither side ever sent one) and the
+/// clock-offset probe every latency measurement depends on. `VideoFrame`
+/// carries the capture timestamp for end-to-end measurement, and `SetMode`
+/// selects a quality preset.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Cap on a single message payload. Generous for 4K video frames, small enough
 /// to reject clearly-corrupt length headers instead of trying to allocate them.
@@ -85,10 +93,34 @@ pub enum Message {
     /// after reading the reason.
     HelloAck { ok: bool, reason: String },
 
-    /// Host -> client, sent once (or again on resolution change) before frames.
-    VideoConfig { codec: String, width: u32, height: u32, fps: u32 },
-    /// Host -> client. `keyframe` lets the client log/measure without parsing NALs.
-    VideoFrame { keyframe: bool, data: Vec<u8> },
+    /// Host -> client, sent once and again whenever the quality mode
+    /// changes the stream. Everything the client receives *after* this
+    /// message is in the announced format -- TCP ordering is what makes
+    /// that unambiguous, so the client can rebuild its decoder on receipt
+    /// without having to guess which frames belong to which config.
+    ///
+    /// `mode` is the preset actually in force, echoed back rather than
+    /// assumed: a client that requested a mode the host rejected should
+    /// display what it is really getting, not what it asked for.
+    /// `drop_budget_ms` is how stale a frame may be before the client
+    /// should skip it. It travels with the config so the preset table has
+    /// exactly one definition, on the host -- duplicating it in the client
+    /// would let the two drift apart silently.
+    VideoConfig {
+        codec: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        mode: u8,
+        drop_budget_ms: u32,
+    },
+    /// Host -> client. `keyframe` lets the client log/measure without parsing
+    /// NALs. `capture_us` is the host's monotonic clock at the moment the
+    /// capture thread received this frame from PipeWire; the client converts
+    /// it through the Ping/Pong clock offset to compute end-to-end latency.
+    /// It excludes compositor->PipeWire latency (measured separately at 4.8ms
+    /// mean in Phase 0), so figures derived from it are a lower bound.
+    VideoFrame { keyframe: bool, capture_us: u64, data: Vec<u8> },
 
     /// Client -> host: relative pointer motion (trackpad mode).
     PointerMotionRelative { dx: f32, dy: f32 },
@@ -110,10 +142,23 @@ pub enum Message {
     /// plan §3.3/§9 (keyboard layout mismatch, dead keys, IME).
     Text { utf8: String },
 
-    /// Either direction: idle-connection keepalive so a NAT/router doesn't
-    /// silently drop the session (plan §9 "Wi-Fi power save dropping packets").
-    Ping { nonce: u64 },
-    Pong { nonce: u64 },
+    /// Client -> host: select a quality preset. `mode` is a
+    /// `palmtopd::modes::Mode` discriminant. Unknown values are rejected by
+    /// the host rather than silently defaulting, so a version skew surfaces as
+    /// an error instead of as the wrong picture quality that nobody notices.
+    SetMode { mode: u8 },
+
+    /// Client -> host: idle-connection keepalive so a NAT/router doesn't
+    /// silently drop the session (plan §9 "Wi-Fi power save dropping
+    /// packets"), *and* the clock-sync probe every latency measurement
+    /// depends on. `t_client_us` is the client's monotonic clock at send.
+    Ping { nonce: u64, t_client_us: u64 },
+    /// Host -> client reply. Echoes `t_client_us` untouched and adds the
+    /// host's own monotonic clock at receive and at send. Those four
+    /// timestamps are exactly what the NTP offset/RTT formulas need -- see
+    /// `LatencyTracker.java`. Sending only a nonce back (as v2 did) would
+    /// make RTT measurable but the clock offset unknowable.
+    Pong { nonce: u64, t_client_us: u64, t_host_recv_us: u64, t_host_send_us: u64 },
 }
 
 #[repr(u8)]
@@ -130,6 +175,7 @@ enum Tag {
     Text = 10,
     Ping = 11,
     Pong = 12,
+    SetMode = 13,
 }
 
 impl Message {
@@ -146,15 +192,18 @@ impl Message {
                 write_str(&mut payload, reason);
                 Tag::HelloAck
             }
-            Message::VideoConfig { codec, width, height, fps } => {
+            Message::VideoConfig { codec, width, height, fps, mode, drop_budget_ms } => {
                 write_str(&mut payload, codec);
                 payload.extend_from_slice(&width.to_be_bytes());
                 payload.extend_from_slice(&height.to_be_bytes());
                 payload.extend_from_slice(&fps.to_be_bytes());
+                payload.push(*mode);
+                payload.extend_from_slice(&drop_budget_ms.to_be_bytes());
                 Tag::VideoConfig
             }
-            Message::VideoFrame { keyframe, data } => {
+            Message::VideoFrame { keyframe, capture_us, data } => {
                 payload.push(*keyframe as u8);
+                payload.extend_from_slice(&capture_us.to_be_bytes());
                 payload.extend_from_slice(data);
                 Tag::VideoFrame
             }
@@ -188,12 +237,20 @@ impl Message {
                 write_str(&mut payload, utf8);
                 Tag::Text
             }
-            Message::Ping { nonce } => {
+            Message::SetMode { mode } => {
+                payload.push(*mode);
+                Tag::SetMode
+            }
+            Message::Ping { nonce, t_client_us } => {
                 payload.extend_from_slice(&nonce.to_be_bytes());
+                payload.extend_from_slice(&t_client_us.to_be_bytes());
                 Tag::Ping
             }
-            Message::Pong { nonce } => {
+            Message::Pong { nonce, t_client_us, t_host_recv_us, t_host_send_us } => {
                 payload.extend_from_slice(&nonce.to_be_bytes());
+                payload.extend_from_slice(&t_client_us.to_be_bytes());
+                payload.extend_from_slice(&t_host_recv_us.to_be_bytes());
+                payload.extend_from_slice(&t_host_send_us.to_be_bytes());
                 Tag::Pong
             }
         };
@@ -240,11 +297,14 @@ impl Message {
                 let width = read_u32(&mut p)?;
                 let height = read_u32(&mut p)?;
                 let fps = read_u32(&mut p)?;
-                Message::VideoConfig { codec, width, height, fps }
+                let mode = read_u8(&mut p)?;
+                let drop_budget_ms = read_u32(&mut p)?;
+                Message::VideoConfig { codec, width, height, fps, mode, drop_budget_ms }
             }
             t if t == Tag::VideoFrame as u8 => {
                 let keyframe = read_u8(&mut p)? != 0;
-                Message::VideoFrame { keyframe, data: p.to_vec() }
+                let capture_us = read_u64(&mut p)?;
+                Message::VideoFrame { keyframe, capture_us, data: p.to_vec() }
             }
             t if t == Tag::PointerMotionRelative as u8 => {
                 let dx = read_f32(&mut p)?;
@@ -273,8 +333,17 @@ impl Message {
                 Message::Key { evdev_code, pressed, modifiers }
             }
             t if t == Tag::Text as u8 => Message::Text { utf8: read_str(&mut p)? },
-            t if t == Tag::Ping as u8 => Message::Ping { nonce: read_u64(&mut p)? },
-            t if t == Tag::Pong as u8 => Message::Pong { nonce: read_u64(&mut p)? },
+            t if t == Tag::SetMode as u8 => Message::SetMode { mode: read_u8(&mut p)? },
+            t if t == Tag::Ping as u8 => Message::Ping {
+                nonce: read_u64(&mut p)?,
+                t_client_us: read_u64(&mut p)?,
+            },
+            t if t == Tag::Pong as u8 => Message::Pong {
+                nonce: read_u64(&mut p)?,
+                t_client_us: read_u64(&mut p)?,
+                t_host_recv_us: read_u64(&mut p)?,
+                t_host_send_us: read_u64(&mut p)?,
+            },
             other => bail!("unknown message tag {other}"),
         };
         Ok(Some(msg))
@@ -356,8 +425,8 @@ mod tests {
     #[test]
     fn video_frame_roundtrips_bytes_exactly() {
         let data = vec![0u8, 1, 2, 255, 254, 0, 0, 0];
-        match roundtrip(Message::VideoFrame { keyframe: true, data: data.clone() }) {
-            Message::VideoFrame { keyframe, data: d } => {
+        match roundtrip(Message::VideoFrame { keyframe: true, capture_us: 0, data: data.clone() }) {
+            Message::VideoFrame { keyframe, data: d, .. } => {
                 assert!(keyframe);
                 assert_eq!(d, data);
             }
@@ -395,5 +464,60 @@ mod tests {
         let mut buf = vec![Tag::VideoFrame as u8];
         buf.extend_from_slice(&(MAX_PAYLOAD + 1).to_be_bytes());
         assert!(Message::read_from(&mut &buf[..]).is_err());
+    }
+
+    #[test]
+    fn ping_pong_roundtrip_carries_timestamps() {
+        match roundtrip(Message::Ping { nonce: 7, t_client_us: 123_456 }) {
+            Message::Ping { nonce, t_client_us } => {
+                assert_eq!(nonce, 7);
+                assert_eq!(t_client_us, 123_456);
+            }
+            other => panic!("expected Ping, got {other:?}"),
+        }
+        match roundtrip(Message::Pong {
+            nonce: 7,
+            t_client_us: 123_456,
+            t_host_recv_us: 200_000,
+            t_host_send_us: 200_050,
+        }) {
+            Message::Pong { nonce, t_client_us, t_host_recv_us, t_host_send_us } => {
+                assert_eq!(nonce, 7);
+                assert_eq!(t_client_us, 123_456);
+                assert_eq!(t_host_recv_us, 200_000);
+                assert_eq!(t_host_send_us, 200_050);
+            }
+            other => panic!("expected Pong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn video_frame_roundtrip_carries_capture_timestamp() {
+        let payload = vec![0u8, 0, 0, 1, 0x65, 0xAA, 0xBB];
+        match roundtrip(Message::VideoFrame {
+            keyframe: true,
+            capture_us: 987_654_321,
+            data: payload.clone(),
+        }) {
+            Message::VideoFrame { keyframe, capture_us, data } => {
+                assert!(keyframe);
+                assert_eq!(capture_us, 987_654_321);
+                assert_eq!(data, payload);
+            }
+            other => panic!("expected VideoFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_mode_roundtrips() {
+        match roundtrip(Message::SetMode { mode: 2 }) {
+            Message::SetMode { mode } => assert_eq!(mode, 2),
+            other => panic!("expected SetMode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_version_is_three() {
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 }

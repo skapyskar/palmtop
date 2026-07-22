@@ -33,6 +33,15 @@ pub struct PairingSection {
     /// or every previously-paired client would be locked out each restart).
     #[serde(default)]
     pub token: String,
+    /// Static Noise (X25519) keypair, hex-encoded. Same generate-once,
+    /// persist-forever pattern as `token` -- see `palmtop_proto::noise` for
+    /// why the client needs to TOFU-pin the *public* half ahead of time, and
+    /// why regenerating this on every restart would break every previously
+    /// paired client, not just prompt a re-scan.
+    #[serde(default)]
+    pub noise_private_key: String,
+    #[serde(default)]
+    pub noise_public_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,20 +109,53 @@ impl HostConfig {
         let mut cfg: HostConfig =
             toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
 
+        // Appended as raw text, not re-serialized, so existing comments and
+        // formatting survive. TOML forbids redefining a `[section]` header,
+        // so the header is only emitted once even if both the token and the
+        // Noise keypair turn out to be missing (true on a fresh file) --
+        // bare `key = value` lines appended afterward, with no new header,
+        // correctly attach to whichever `[pairing]` table is already open,
+        // which is always the last section in files this function writes.
+        let mut appended = String::new();
+        let has_pairing_header = text.contains("[pairing]");
+        let open_header = |appended: &mut String| {
+            if !has_pairing_header && appended.is_empty() {
+                appended.push_str("\n[pairing]\n");
+            }
+        };
+
         if cfg.pairing.token.is_empty() {
             let token = generate_token()?;
-            // Appended as raw text, not re-serialized, so existing comments
-            // and formatting in the file are left untouched.
+            open_header(&mut appended);
+            appended.push_str(&format!(
+                "# Generated on first run -- required in Hello for a client to be accepted.\ntoken = \"{token}\"\n"
+            ));
+            cfg.pairing.token = token;
+        }
+
+        if cfg.pairing.noise_private_key.is_empty() || cfg.pairing.noise_public_key.is_empty() {
+            let (priv_key, pub_key) = palmtop_proto::NoiseTransport::generate_keypair()
+                .context("generate noise keypair")?;
+            let priv_hex = palmtop_proto::noise::to_hex(&priv_key);
+            let pub_hex = palmtop_proto::noise::to_hex(&pub_key);
+            open_header(&mut appended);
+            appended.push_str(&format!(
+                "# Static Noise keypair -- the public half also goes into the QR/pairing\n\
+                 # info so clients can TOFU-pin it. See palmtop-proto::noise.\n\
+                 noise_private_key = \"{priv_hex}\"\nnoise_public_key = \"{pub_hex}\"\n"
+            ));
+            cfg.pairing.noise_private_key = priv_hex;
+            cfg.pairing.noise_public_key = pub_hex;
+        }
+
+        if !appended.is_empty() {
             let mut updated = text;
             if !updated.ends_with('\n') {
                 updated.push('\n');
             }
-            updated.push_str(&format!(
-                "\n[pairing]\n# Generated on first run -- required in Hello for a client to be accepted.\ntoken = \"{token}\"\n"
-            ));
+            updated.push_str(&appended);
             std::fs::write(&path, updated)
-                .with_context(|| format!("persist generated pairing token to {}", path.display()))?;
-            cfg.pairing.token = token;
+                .with_context(|| format!("persist generated pairing info to {}", path.display()))?;
         }
 
         Ok(cfg)

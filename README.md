@@ -380,18 +380,104 @@ by `spike-capture-latency`; this was a client-only change. Trackpad mode may ret
 as a selectable option (plan §4.3 still wants both), but direct-touch is the default now.
 
 ### Explicitly deferred (not forgotten, scoped out on purpose)
-- **Transport encryption.** Pairing now has a real access-control gate (token in `Hello`,
-  checked in `session::handshake`), but the session itself is still plaintext on the LAN.
-  The plan's Noise-protocol design (§3.5/§6) is a substantial standalone piece of work.
-- **In-app QR scanning.** The QR code is real and correctly encodes `palmtop://host:port/token`;
-  scanning it with the *phone's camera* needs CameraX/ML Kit and permissions — deferred rather
-  than rushed. Today the token reaches the client the same way host/port do (`--es token ...`,
-  then persisted).
-- **Android NSD (mDNS) browsing.** Host-side advertisement is real and verified (active query
-  → real response over actual mDNS multicast). The client-side discovery UI is not built yet;
-  connecting still uses a known host/port.
 - **True display-latency measurement** still needs external hardware (camera/photodiode) —
-  unchanged from the Phase 0 finding.
+  unchanged from the Phase 0 finding. This is now the *only* remaining deferred item.
+
+### In-app QR camera scanning — done (`QrScanActivity` + `QrOverlayView`)
+CameraX + ML Kit, launched from the discovery screen's **📷 Scan QR code** button, returning
+host/port/token/pubkey straight into the connect flow. Verified live end-to-end: scan →
+Noise handshake → `h264_vaapi 1920x1080@30` streaming, from a factory-reset app install.
+
+**The bug worth remembering, because it produced no error of any kind.** The first version
+detected *nothing*. Camera opened, ML Kit initialised, TFLite delegates loaded, zero
+exceptions anywhere in the logs — and zero barcodes, across repeated real attempts. Cause:
+CameraX's default `ImageAnalysis` resolution is **640x480**. Our pairing URI carries a
+64-hex-character Noise public key, which pushes the QR to ~57x57 modules; at 640x480 from a
+normal holding distance each module landed on well under a pixel. Nothing was broken — the
+decoder simply never had the detail. The whole failure was invisible in logs because a
+correctly-functioning pipeline that sees nothing looks exactly like one pointed at a wall.
+
+Generalisable lesson: **when a vision/decode stage reports nothing rather than failing, suspect
+the input resolution before the algorithm.** Diagnosing it needed CameraX's *own* logs
+(`primaryStreamSpec = StreamSpec{resolution=640x480}`), not the app's — so `QrScanActivity`
+now logs its analysis resolution on the first frame, deliberately, so the next person never
+has to go looking for that.
+
+Three fixes, in descending order of how much each mattered:
+1. **1080p analysis frames** via `ResolutionSelector` — the actual fix. Costs frame rate
+   (ML Kit at 1080p runs well under 30fps on a Snapdragon 695), but `KEEP_ONLY_LATEST` turns
+   that into dropped frames rather than queueing, and a few readable frames beat thirty
+   unreadable ones. Same "never queue" invariant as everywhere else in this pipeline.
+2. **ML Kit zoom suggestion** — when it sees a code that's present but too small, it asks for
+   a zoom and we apply it, so standing slightly too far back self-corrects instead of the user
+   having to find the right distance by trial and error.
+3. **QR-only formats** + tap-to-focus (continuous AF hunts on a flat, evenly-lit screen at
+   close range, which is exactly our case).
+
+`QrOverlayView` draws a live outline on the detected code — green when it parses as a palmtop
+pairing URI, white when it's a QR but not ours. That distinction is the point: "detected but
+undecodable" and "detected nothing" were indistinguishable before, which is precisely what
+made the original bug so opaque. Its coordinate mapping reimplements PreviewView's
+`FILL_CENTER` transform exactly (ML Kit reports corners in *rotated* analysis-image space),
+and both Preview and ImageAnalysis are pinned to one aspect ratio so a single transform is
+valid for both streams.
+
+**Host-side counterpart: palmtopd now also writes a scannable QR file.** The terminal QR uses
+`unicode::Dense1x2`, which packs two vertical modules per character cell — non-square modules,
+a few hundred physical pixels total. That is genuinely not camera-readable for a code this
+dense, and pretending otherwise was half the problem. `pairing.rs::write_qr_svg` writes
+`$XDG_RUNTIME_DIR/palmtop-pair.svg` (mode 0600, tmpfs — it embeds the pairing token, so it
+should not outlive the session), and **`./scripts/show-pair-qr.sh`** puts it on screen
+fullscreen. The terminal QR stays first in the output because when it works it's the fastest
+path; the SVG is the one that reliably scans.
+
+### Transport encryption (Noise Protocol) — done
+Pattern: `Noise_NK_25519_ChaChaPoly_BLAKE2s` (client needs no static key of its own; the host's
+static public key must be known ahead of time — exactly the QR/mDNS pairing model already
+built). Wired into **both** ends: `palmtop-proto::noise` (Rust, `snow`) and
+`android/.../NoiseTransport.java` (Java, Signal's `org.signal.forks:noise-java` fork) —
+**verified with a real cross-language handshake**, Android talking to the Linux daemon, not
+just each side's own unit tests. The session (video + input, not just the pairing token) is
+now genuinely encrypted on the wire, not plaintext.
+
+Real bug found and fixed while wiring this in, worth remembering as a class: **a shared
+`Mutex`/lock guarding both encrypt and decrypt deadlocked the reader and writer threads**,
+because the original `send`/`recv` combined crypto with *blocking network I/O* inside one
+lock — the reader thread's blocked read (waiting on the peer) held the lock the writer thread
+needed just to send `VideoConfig`. First symptom was the test client hanging indefinitely past
+its own timeout. Fixed by splitting `encrypt_chunk`/`decrypt_chunk` (pure computation, safe
+under a lock) from the actual socket I/O (must happen outside any shared lock) — applied
+identically on both the Rust and Java sides, the second time by design rather than by
+rediscovering the bug twice.
+
+Honest gap, not hidden, and **not closed by the QR scanner landing**: the client still accepts
+an mDNS-advertised public key through the discovery path, and mDNS is LAN-broadcast rather than
+truly out-of-band. Camera scanning now makes a genuinely out-of-band source *available*, but
+until mDNS-sourced keys stop being trusted (or only scan-sourced pairings count as pinned), a
+user who taps a discovered host rather than scanning is still exposed to a spoofed
+advertisement. That's a deliberate follow-up decision with a real usability cost either way —
+see `pairing.rs`'s doc comment for exactly what it does and doesn't protect against.
+
+### Client build: migrated to Gradle
+`android/` is now the real, actively-maintained client project (Gradle 9.6.1 + AGP 9.3.0,
+JDK 17, same debug keystore as before so `adb install -r` still works over old installs).
+Moved off the manual `aapt2`/`d8`/`build.sh` approach specifically so real dependencies (like
+`noise-java`) resolve normally. `android-spike/` is now historical/frozen — the Phase 0 spike
+history and the manual-build reference, not where new work happens.
+
+### Android-side discovery (`HostDiscovery.java`) — done
+No more `adb`-launched Intents needed for a new setup. First launch with nothing persisted
+shows a "Find a Palmtop host" screen: `NsdManager` browses for the real `_palmtop._tcp` service
+the daemon advertises, resolves it to host:port, and a tap prompts for the pairing token before
+connecting. **📷 Scan QR code** on the same screen skips the typing entirely (see the QR scanning
+section above); manual host/port entry is offered alongside as a fallback for networks that
+block multicast (plan §9).
+Verified live: discovered the running daemon, resolved it correctly, connected, and streamed —
+screenshotted at each step, not just "it compiled."
+
+Known rough edge: the Reconnect/⌨ buttons are visually reachable underneath the discovery
+overlay (a FrameLayout z-order/sizing quirk) — harmless (tapping Reconnect while no host is set
+is a no-op) but worth a cleanup pass later.
 
 ### Try it
 ```sh

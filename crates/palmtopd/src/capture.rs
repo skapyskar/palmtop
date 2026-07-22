@@ -9,8 +9,8 @@
 //! build a backlog.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
@@ -29,6 +29,27 @@ pub struct Frame {
     pub format: VideoFormat,
     /// Tightly packed (stride padding stripped), one row after another.
     pub bytes: Vec<u8>,
+    /// [`monotonic_us`] at the moment this frame arrived from PipeWire.
+    ///
+    /// Travels with the frame all the way to the client, which converts it
+    /// through the Ping/Pong clock offset to compute end-to-end latency.
+    /// It excludes compositor->PipeWire latency -- measured separately at
+    /// 4.8ms mean in Phase 0 -- so anything derived from it is a lower
+    /// bound on true capture-to-display, not the whole story.
+    pub capture_us: u64,
+}
+
+/// Microseconds on a process-wide monotonic clock.
+///
+/// `Instant` has no numeric representation, so this counts from the first
+/// call. The epoch is arbitrary and differs from the client's -- which is
+/// fine, and precisely what the Ping/Pong clock-offset estimate absorbs.
+/// Monotonic rather than wall-clock deliberately: an NTP step or a
+/// suspend/resume would otherwise make frames appear to arrive before they
+/// were captured.
+pub fn monotonic_us() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 /// Single-slot mailbox: publishing overwrites whatever hadn't been taken yet.
@@ -166,6 +187,7 @@ pub fn run(
                 height: height as u32,
                 format: d.format.format(),
                 bytes: packed,
+                capture_us: monotonic_us(),
             });
         })
         .register()

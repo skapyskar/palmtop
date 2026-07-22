@@ -9,3 +9,4 @@ description = "Loads local host/device profiles from config/, so no machine- or 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+palmtop-proto = { path = "../palmtop-proto" }

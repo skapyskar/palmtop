@@ -7,3 +7,4 @@ description = "Wire protocol shared by the host daemon and Android client: frame
 
 [dependencies]
 anyhow = "1"
+snow = "0.10"

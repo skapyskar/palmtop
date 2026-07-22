@@ -1,6 +1,7 @@
 package dev.palmtop.spike;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.media.MediaCodec;
@@ -28,13 +29,14 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -72,6 +74,15 @@ public class MainActivity extends Activity {
      * its own pass), so for now this arrives the same way host/port did
      * before persistence existed: `--es token <token>`, then remembered. */
     private String token = "";
+    /** Host's static Noise public key (hex), for TOFU-pinning -- see
+     * palmtop_proto::noise's doc comment for exactly what trusting a value
+     * learned via mDNS/manual entry here does and doesn't protect against. */
+    private String pubkey = "";
+    /** Set once the Noise handshake completes; shared between the reader and
+     * writer threads. Safe: NoiseTransport's crypto methods are `synchronized`
+     * and never do I/O internally -- see its class doc comment for the
+     * deadlock this design specifically avoids. */
+    private volatile NoiseTransport noise;
 
     private SurfaceView surfaceView;
     private SurfaceHolder surfaceHolder;
@@ -79,6 +90,22 @@ public class MainActivity extends Activity {
     private EditText hiddenInput;
     private Button kbToggle;
     private Button reconnectButton;
+    private Button modeButton;
+    private Button hudToggle;
+    private HudView hud;
+    /** Current stream format. Replaced when the host announces a new one
+     *  after a mode change, so it cannot be a local: the UI lambdas below
+     *  would need it effectively-final. */
+    private volatile Protocol.Received videoConfig;
+    /** Preset the user picked. Persisted so a session resumed after an app
+     *  restart comes back in the chosen mode rather than the host default. */
+    private int currentMode = MODE_BALANCED;
+
+    static final int MODE_SYNC = 0, MODE_BALANCED = 1, MODE_QUALITY = 2, MODE_BATTERY = 3;
+    /** Display names only. Everything the modes actually *do* -- resolution,
+     *  fps, bitrate, drop budget -- is defined once on the host (modes.rs)
+     *  and arrives in VideoConfig, so the two cannot drift apart. */
+    private static final String[] MODE_NAMES = { "Sync", "Balanced", "Quality", "Battery" };
     /** Generation counter: incremented on every (re)connect so a network
      * thread from a *previous* connection attempt can tell it's stale and
      * exit quietly instead of fighting the new one over shared state. */
@@ -101,6 +128,26 @@ public class MainActivity extends Activity {
      * in the Phase 0 spike; same principle applied here from day one. */
     private final Semaphore inFlight = new Semaphore(1);
 
+    /** Clock offset, RTT and latency percentiles. See LatencyTracker. */
+    private final LatencyTracker latency = new LatencyTracker();
+    /** How stale a frame may be before it is skipped. Set by the host's
+     *  VideoConfig so the preset table has exactly one definition. */
+    private volatile long dropBudgetUs = 80_000;
+    /** When the single in-flight frame was queued to the decoder.
+     *  Safe as one field only because inFlight caps frames in flight at 1
+     *  -- if that cap is ever raised this must become a map keyed on
+     *  presentation timestamp. */
+    private volatile long queuedAtUs = 0;
+
+    /** Probe schedule: a burst on connect, then steady state. At one per
+     *  second the offset window would take ~15s to fill, and until it does
+     *  every end-to-end figure rests on a barely-sampled offset. */
+    private static final int PING_BURST = 5;
+    private static final long PING_BURST_INTERVAL_US = 200_000;
+    private static final long PING_STEADY_INTERVAL_US = 1_000_000;
+
+    private static long nowUs() { return System.nanoTime() / 1000L; }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -112,16 +159,25 @@ public class MainActivity extends Activity {
         // meant every relaunch needed a fresh `adb shell am start --es host
         // ...` from the host machine just to reconnect.
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        // An `--ei mode N` extra overrides the persisted choice, which is what
+        // lets scripts/measure-latency.sh drive a run through all four presets
+        // without anyone tapping through a dialog thirty times.
+        currentMode = getIntent().getIntExtra("mode", prefs.getInt("mode", MODE_BALANCED));
+        if (currentMode < 0 || currentMode >= MODE_NAMES.length) currentMode = MODE_BALANCED;
         host = getIntent().getStringExtra("host");
         port = getIntent().getIntExtra("port", 0);
         token = getIntent().getStringExtra("token");
+        pubkey = getIntent().getStringExtra("pubkey");
         if (host == null || host.isEmpty() || port == 0) {
             host = prefs.getString("host", null);
             port = prefs.getInt("port", 0);
             token = prefs.getString("token", "");
+            pubkey = prefs.getString("pubkey", "");
         } else {
             token = token == null ? "" : token;
-            prefs.edit().putString("host", host).putInt("port", port).putString("token", token).apply();
+            pubkey = pubkey == null ? "" : pubkey;
+            prefs.edit().putString("host", host).putInt("port", port)
+                    .putString("token", token).putString("pubkey", pubkey).apply();
         }
 
         FrameLayout root = new FrameLayout(this);
@@ -170,6 +226,14 @@ public class MainActivity extends Activity {
             @Override public void afterTextChanged(Editable s) {}
         });
 
+        // Sits above the video but below the buttons, top-right, so it never
+        // covers the status text at top-left.
+        hud = new HudView(this);
+        FrameLayout.LayoutParams hudLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        hudLp.gravity = Gravity.TOP | Gravity.END;
+        root.addView(hud, hudLp);
+
         kbToggle = new Button(this);
         kbToggle.setText("⌨");
         FrameLayout.LayoutParams kbLp = new FrameLayout.LayoutParams(
@@ -189,9 +253,26 @@ public class MainActivity extends Activity {
         root.addView(reconnectButton, reconnectLp);
         reconnectButton.setOnClickListener(v -> startConnection());
 
+        modeButton = new Button(this);
+        modeButton.setText("⚙");
+        FrameLayout.LayoutParams modeLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        modeLp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        root.addView(modeButton, modeLp);
+        modeButton.setOnClickListener(v -> showModePicker());
+        updateModeButton();
+
+        hudToggle = new Button(this);
+        hudToggle.setText("📊");
+        FrameLayout.LayoutParams hudToggleLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        hudToggleLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        root.addView(hudToggle, hudToggleLp);
+        hudToggle.setOnClickListener(v -> hud.setShown(!hud.isHudShown()));
+
         setContentView(root);
 
-        if (host == null || host.isEmpty() || port == 0) {
+        if (host == null || host.isEmpty() || port == 0 || pubkey == null || pubkey.isEmpty()) {
             // Hidden (not just visually covered) while discovery is showing --
             // a FrameLayout z-order/sizing quirk let them peek through under
             // the discovery overlay before; GONE is unambiguous regardless of
@@ -199,6 +280,8 @@ public class MainActivity extends Activity {
             // picked and startConnection() actually runs (see below).
             kbToggle.setVisibility(View.GONE);
             reconnectButton.setVisibility(View.GONE);
+            modeButton.setVisibility(View.GONE);
+            hudToggle.setVisibility(View.GONE);
             showDiscoveryOverlay(root);
             return;
         }
@@ -227,18 +310,34 @@ public class MainActivity extends Activity {
      * README's "explicitly deferred" list), then connects the same way a
      * fully adb-launched Intent would have.
      */
+    /** Stashed so {@link #onActivityResult} (fired after QrScanActivity
+     * returns) can tear down the same discovery views the manual/mDNS paths
+     * do, via completeConnectionSetup. */
+    private FrameLayout discoveryRoot;
+    private LinearLayout discoveryOverlayView;
+
+    private static final int REQUEST_SCAN_QR = 1;
+
     private void showDiscoveryOverlay(FrameLayout root) {
         LinearLayout overlay = new LinearLayout(this);
         overlay.setOrientation(LinearLayout.VERTICAL);
         overlay.setBackgroundColor(Color.BLACK);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
         overlay.setPadding(pad, pad, pad, pad);
+        discoveryRoot = root;
+        discoveryOverlayView = overlay;
 
         TextView title = new TextView(this);
         title.setText("Find a Palmtop host");
         title.setTextColor(Color.WHITE);
         title.setTextSize(20);
         overlay.addView(title);
+
+        Button scanQrButton = new Button(this);
+        scanQrButton.setText("📷 Scan QR code");
+        scanQrButton.setOnClickListener(v ->
+                startActivityForResult(new Intent(this, QrScanActivity.class), REQUEST_SCAN_QR));
+        overlay.addView(scanQrButton);
 
         TextView hint = new TextView(this);
         hint.setText("Scanning for palmtopd on this Wi-Fi network...");
@@ -258,12 +357,13 @@ public class MainActivity extends Activity {
 
         java.util.Set<String> shown = new java.util.LinkedHashSet<>();
         hostDiscovery = new HostDiscovery(this, new HostDiscovery.Listener() {
-            @Override public void onHostFound(String name, String foundHost, int foundPort) {
+            @Override public void onHostFound(String name, String foundHost, int foundPort, String foundPubkey) {
                 runOnUiThread(() -> {
                     if (shown.contains(name)) return;
                     Button entry = new Button(MainActivity.this);
                     entry.setText(name + "\n" + foundHost + ":" + foundPort);
-                    entry.setOnClickListener(v -> promptForTokenAndConnect(root, overlay, foundHost, foundPort));
+                    entry.setOnClickListener(v ->
+                            promptForTokenAndConnect(root, overlay, foundHost, foundPort, foundPubkey));
                     results.addView(entry);
                     shown.add(name);
                 });
@@ -296,20 +396,25 @@ public class MainActivity extends Activity {
         manualPort.setHint("port (e.g. 9999)");
         manualPort.setInputType(InputType.TYPE_CLASS_NUMBER);
         overlay.addView(manualPort);
+        EditText manualPubkey = new EditText(this);
+        manualPubkey.setHint("pubkey (64 hex chars, from the host's terminal output)");
+        overlay.addView(manualPubkey);
         Button manualGo = new Button(this);
         manualGo.setText("Next");
         manualGo.setOnClickListener(v -> {
             String h = manualHost.getText().toString().trim();
             String pStr = manualPort.getText().toString().trim();
-            if (h.isEmpty() || pStr.isEmpty()) return;
+            String pk = manualPubkey.getText().toString().trim();
+            if (h.isEmpty() || pStr.isEmpty() || pk.isEmpty()) return;
             try {
-                promptForTokenAndConnect(root, overlay, h, Integer.parseInt(pStr));
+                promptForTokenAndConnect(root, overlay, h, Integer.parseInt(pStr), pk);
             } catch (NumberFormatException ignored) {}
         });
         overlay.addView(manualGo);
     }
 
-    private void promptForTokenAndConnect(FrameLayout root, LinearLayout overlay, String foundHost, int foundPort) {
+    private void promptForTokenAndConnect(
+            FrameLayout root, LinearLayout overlay, String foundHost, int foundPort, String foundPubkey) {
         if (hostDiscovery != null) hostDiscovery.stop();
 
         LinearLayout tokenRow = new LinearLayout(this);
@@ -328,6 +433,18 @@ public class MainActivity extends Activity {
         tokenInput.setHint("token");
         tokenRow.addView(tokenInput);
 
+        // Pre-filled when mDNS supplied it (the normal case); left editable
+        // as a fallback in case an older host doesn't advertise it yet, or
+        // discovery didn't resolve TXT records for some reason.
+        TextView pubkeyLabel = new TextView(this);
+        pubkeyLabel.setText("Host public key (for encryption -- auto-filled when discovered):");
+        pubkeyLabel.setTextColor(Color.WHITE);
+        tokenRow.addView(pubkeyLabel);
+        EditText pubkeyInput = new EditText(this);
+        pubkeyInput.setHint("pubkey (64 hex chars)");
+        pubkeyInput.setText(foundPubkey == null ? "" : foundPubkey);
+        tokenRow.addView(pubkeyInput);
+
         Button connectBtn = new Button(this);
         connectBtn.setText("Connect");
         tokenRow.addView(connectBtn);
@@ -337,32 +454,54 @@ public class MainActivity extends Activity {
 
         connectBtn.setOnClickListener(v -> {
             String enteredToken = tokenInput.getText().toString().trim();
-            host = foundHost;
-            port = foundPort;
-            token = enteredToken;
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString("host", host).putInt("port", port).putString("token", token).apply();
-
-            root.removeView(tokenRow);
-            root.removeView(overlay);
-            kbToggle.setVisibility(View.VISIBLE);
-            reconnectButton.setVisibility(View.VISIBLE);
-            surfaceView.setOnTouchListener(this::onTouch);
-            surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
-                @Override public void surfaceCreated(SurfaceHolder holder) {
-                    surfaceHolder = holder;
-                    startConnection();
-                }
-                @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int ht) {}
-                @Override public void surfaceDestroyed(SurfaceHolder h) { generation++; }
-            });
-            // The surface almost certainly already exists (it's been in the
-            // view hierarchy since onCreate, just obscured) -- addCallback
-            // alone won't re-fire surfaceCreated for an already-created
-            // surface, so kick off the connection directly too.
-            surfaceHolder = surfaceView.getHolder();
-            startConnection();
+            String enteredPubkey = pubkeyInput.getText().toString().trim();
+            if (enteredPubkey.isEmpty()) {
+                pubkeyLabel.setTextColor(Color.RED);
+                pubkeyLabel.setText("Host public key is required -- check the host's terminal output.");
+                return;
+            }
+            completeConnectionSetup(root, java.util.Arrays.asList(tokenRow, overlay),
+                    foundHost, foundPort, enteredToken, enteredPubkey);
         });
+    }
+
+    /**
+     * Shared tail end of every pairing path (manual entry, mDNS-assisted
+     * entry, and QR scan): persist the connection details, tear down
+     * whichever setup views are still showing, and kick off the connection.
+     */
+    private void completeConnectionSetup(
+            FrameLayout root, List<View> viewsToRemove, String h, int p, String t, String pk) {
+        host = h;
+        port = p;
+        token = t;
+        pubkey = pk;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("host", host).putInt("port", port)
+                .putString("token", token).putString("pubkey", pubkey).apply();
+
+        for (View v : viewsToRemove) {
+            root.removeView(v);
+        }
+        kbToggle.setVisibility(View.VISIBLE);
+        reconnectButton.setVisibility(View.VISIBLE);
+        modeButton.setVisibility(View.VISIBLE);
+        hudToggle.setVisibility(View.VISIBLE);
+        surfaceView.setOnTouchListener(this::onTouch);
+        surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override public void surfaceCreated(SurfaceHolder holder) {
+                surfaceHolder = holder;
+                startConnection();
+            }
+            @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int ht) {}
+            @Override public void surfaceDestroyed(SurfaceHolder h) { generation++; }
+        });
+        // The surface almost certainly already exists (it's been in the view
+        // hierarchy since onCreate, just obscured) -- addCallback alone won't
+        // re-fire surfaceCreated for an already-created surface, so kick off
+        // the connection directly too.
+        surfaceHolder = surfaceView.getHolder();
+        startConnection();
     }
 
     /**
@@ -384,9 +523,24 @@ public class MainActivity extends Activity {
         connected = false;
         decodedFrames = 0;
         droppedFrames = 0;
+        noise = null;
         outbox.clear();
         try { if (socket != null) socket.close(); } catch (IOException ignored) {}
         socket = null;
+        releaseCodec();
+    }
+
+    /**
+     * Tears the decoder down so a new one can be configured for a different
+     * resolution.
+     *
+     * Resetting availableInputs and the inFlight permit is not optional
+     * housekeeping: a stale permit count would silently throttle the rebuilt
+     * decoder to fewer frames in flight than intended, or leave a permit
+     * outstanding that nothing will ever release, stalling playback with no
+     * error anywhere.
+     */
+    private void releaseCodec() {
         try { if (codec != null) { codec.stop(); codec.release(); } } catch (Exception ignored) {}
         codec = null;
         if (codecThread != null) codecThread.quitSafely();
@@ -394,6 +548,45 @@ public class MainActivity extends Activity {
         availableInputs.clear();
         inFlight.drainPermits();
         inFlight.release();
+        queuedAtUs = 0;
+    }
+
+
+    // ------------------------------------------------------------ quality modes
+
+    /**
+     * Presets trade picture quality and power against sync. What each one
+     * actually does lives on the host (palmtopd's modes.rs) and arrives in
+     * VideoConfig -- the client only names them and asks. Keeping the numbers
+     * in one place means the two ends cannot quietly disagree about what
+     * "Sync mode" means.
+     */
+    private void showModePicker() {
+        String[] items = new String[MODE_NAMES.length];
+        for (int i = 0; i < MODE_NAMES.length; i++) {
+            items[i] = (i == currentMode ? "● " : "○ ") + MODE_NAMES[i];
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Quality mode")
+                .setItems(items, (dialog, which) -> selectMode(which))
+                .show();
+    }
+
+    private void selectMode(int mode) {
+        if (mode < 0 || mode >= MODE_NAMES.length) return;
+        currentMode = mode;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("mode", mode).apply();
+        updateModeButton();
+        if (connected) {
+            enqueue(Protocol.setMode(mode));
+            // The button and drop budget update again when the host's
+            // VideoConfig arrives -- that is the authoritative answer, and it
+            // may differ from what was requested if the host declined it.
+        }
+    }
+
+    private void updateModeButton() {
+        if (modeButton != null) modeButton.setText("⚙ " + MODE_NAMES[currentMode]);
     }
 
     // ------------------------------------------------------------ touch input
@@ -484,23 +677,44 @@ public class MainActivity extends Activity {
             mySocket.setTcpNoDelay(true);
             Log.i(TAG, "connected to " + host + ":" + port);
 
+            // Deliberately NOT a BufferedInputStream: it would read ahead and
+            // buffer bytes belonging to whichever phase (handshake vs. Noise
+            // transport frames) comes next past whatever it happened to grab,
+            // silently losing them from that phase's point of view.
+            // DataInputStream reads exactly what's asked for per call with no
+            // internal read-ahead, so the same instance is safe to use across
+            // both the handshake and everything after it.
             OutputStream rawOut = mySocket.getOutputStream();
-            rawOut.write(Protocol.hello(token));
-            rawOut.flush();
+            DataInputStream rawIn = new DataInputStream(mySocket.getInputStream());
 
-            DataInputStream in = new DataInputStream(new BufferedInputStream(mySocket.getInputStream()));
-            Protocol.Received ack = Protocol.readMessage(in);
+            byte[] hostPubKey = hexDecode(pubkey);
+            noise = NoiseTransport.handshakeInitiator(rawIn, rawOut, hostPubKey);
+            Log.i(TAG, "noise handshake ok");
+
+            sendEncrypted(rawOut, Protocol.hello(token));
+            Protocol.Received ack = recvEncrypted(rawIn);
             if (ack == null || ack.tag != Protocol.TAG_HELLO_ACK || !ack.ok) {
                 String reason = ack != null ? ack.reason : "connection closed during handshake";
                 throw new IOException("handshake rejected: " + reason);
             }
             Log.i(TAG, "handshake ok");
 
-            Protocol.Received cfg = Protocol.readMessage(in);
+            Protocol.Received cfg = recvEncrypted(rawIn);
             if (cfg == null || cfg.tag != Protocol.TAG_VIDEO_CONFIG) {
                 throw new IOException("expected VideoConfig, got " + (cfg == null ? "EOF" : cfg.tag));
             }
-            Log.i(TAG, "video config: " + cfg.codec + " " + cfg.width + "x" + cfg.height + "@" + cfg.fps);
+            videoConfig = cfg;
+            // The host opens in its own default. If the user picked
+            // something else previously, re-assert it now rather than
+            // silently reverting them on every reconnect.
+            if (currentMode != cfg.mode) {
+                enqueue(Protocol.setMode(currentMode));
+            } else {
+                currentMode = cfg.mode;
+            }
+            Log.i(TAG, "video config: " + cfg.codec + " " + cfg.width + "x" + cfg.height + "@" + cfg.fps
+                    + " mode=" + cfg.mode + " dropBudget=" + cfg.dropBudgetMs + "ms");
+            dropBudgetUs = cfg.dropBudgetMs * 1000L;
             if (generation == myGeneration) {
                 runOnUiThread(() -> statusView.setText("connected " + host + ":" + port + "\n"
                         + cfg.width + "x" + cfg.height + "@" + cfg.fps + "fps"));
@@ -513,7 +727,7 @@ public class MainActivity extends Activity {
             writer.start();
 
             while (generation == myGeneration) {
-                Protocol.Received msg = Protocol.readMessage(in);
+                Protocol.Received msg = recvEncrypted(rawIn);
                 if (msg == null) {
                     Log.i(TAG, "host closed the connection");
                     break;
@@ -529,11 +743,26 @@ public class MainActivity extends Activity {
                     // compounded without bound instead of self-correcting:
                     // the observed symptom was the picture falling further
                     // and further behind over time, never catching up.
-                    // `in.available() > 0` means more bytes are already
-                    // buffered locally -- a newer frame (or at least the
-                    // start of one) is already behind this one, so decoding
-                    // this one is wasted work the newer frame will
-                    // immediately supersede on screen anyway.
+                    // Drop only when a newer frame is ALREADY buffered
+                    // locally. That is the condition under which dropping is
+                    // free: something strictly better is about to supersede
+                    // this on screen anyway, so skipping it costs nothing and
+                    // stops the gap compounding.
+                    //
+                    // An age-against-a-budget rule was tried here and measured
+                    // *worse*, which is worth recording because it sounds more
+                    // principled. Steady-state e2e on this link is ~117ms
+                    // while the balanced budget is 80ms, so a pure age test
+                    // discarded ~45% of frames even when the pipeline was
+                    // keeping up and nothing newer was waiting. Those drops
+                    // buy no latency back -- the next frame is equally late --
+                    // they just throw away frames already paid for in
+                    // bandwidth and decryption, and lower the framerate. The
+                    // useful question is not "is this frame old?" but "is
+                    // there a better one right behind it?".
+                    //
+                    // Frame age is still measured (it drives the HUD and the
+                    // benchmark), it just is not what decides this.
                     //
                     // Keyframes are never skipped, no matter how much is
                     // buffered behind them: they carry SPS/PPS and are the
@@ -546,20 +775,52 @@ public class MainActivity extends Activity {
                     // "decoder saturated" from the very first one, because
                     // an early version of this skip check dropped the
                     // opening keyframe along with the backlog behind it.)
-                    if (!msg.keyframe && in.available() > 0) {
+                    boolean supersededByNewerFrame = !msg.keyframe && rawIn.available() > 0;
+                    if (supersededByNewerFrame) {
                         droppedFrames++;
+                        latency.recordDrop();
                     } else {
                         decodedFrames++;
-                        feedDecoder(msg.data);
+                        feedDecoder(msg.data, msg.captureUs);
                     }
                     if (generation == myGeneration && (decodedFrames + droppedFrames) % 30 == 0) {
-                        long d = decodedFrames, s = droppedFrames;
-                        runOnUiThread(() -> statusView.setText(host + ":" + port + "  "
-                                + cfg.width + "x" + cfg.height + "@" + cfg.fps + "fps\n"
-                                + "decoded " + d + "  dropped-stale " + s));
+                        long d = decodedFrames, sk = droppedFrames;
+                        Protocol.Received vc = videoConfig;
+                        LatencyTracker.Stats stats = latency.snapshot();
+                        // Machine-readable line for scripts/measure-latency.sh --
+                        // parsing key=value beats screen-scraping the HUD.
+                        Log.i(TAG, String.format(java.util.Locale.US,
+                                "stats mode=%s e2e_p50_us=%d e2e_p95_us=%d rtt_p50_us=%d "
+                                        + "decode_p50_us=%d drop_pct=%.2f w=%d h=%d fps=%d valid=%b",
+                                MODE_NAMES[currentMode], stats.e2eP50, stats.e2eP95, stats.rttP50,
+                                stats.decodeP50, stats.dropPercent, vc.width, vc.height, vc.fps,
+                                stats.valid));
+                        runOnUiThread(() -> {
+                            statusView.setText(host + ":" + port + "  "
+                                    + vc.width + "x" + vc.height + "@" + vc.fps + "fps\n"
+                                    + "decoded " + d + "  dropped-stale " + sk);
+                            hud.update(stats, MODE_NAMES[currentMode], vc.width, vc.height, vc.fps);
+                        });
                     }
-                } else if (msg.tag == Protocol.TAG_PING) {
-                    enqueue(Protocol.pong(msg.nonce));
+                } else if (msg.tag == Protocol.TAG_PONG) {
+                    latency.onPong(msg.tClientUs, msg.tHostRecvUs, msg.tHostSendUs, nowUs());
+                } else if (msg.tag == Protocol.TAG_VIDEO_CONFIG) {
+                    // A mode change. TCP is ordered, so *every* frame after this
+                    // message is in the announced format -- there is no ambiguity
+                    // about which frames belong to which config, and no need to
+                    // buffer or guess. Rebuild the decoder and carry on.
+                    Protocol.Received previous = videoConfig;
+                    videoConfig = msg;
+                    currentMode = msg.mode;
+                    dropBudgetUs = msg.dropBudgetMs * 1000L;
+                    if (previous == null || msg.width != previous.width
+                            || msg.height != previous.height) {
+                        Log.i(TAG, "stream format changed to " + msg.width + "x" + msg.height
+                                + " -- rebuilding decoder");
+                        releaseCodec();
+                        configureCodec(holder, msg.width, msg.height);
+                    }
+                    runOnUiThread(this::updateModeButton);
                 }
             }
             writer.interrupt();
@@ -578,16 +839,64 @@ public class MainActivity extends Activity {
     }
 
     private void runWriter(OutputStream out, int myGeneration) {
+        long nextPingAt = 0, pingsSent = 0, nonce = 0;
         try {
             while (generation == myGeneration) {
-                byte[] msg = outbox.poll(1, TimeUnit.SECONDS);
+                if (nowUs() >= nextPingAt) {
+                    // Sent directly rather than through the outbox: the
+                    // timestamp has to be taken immediately before the
+                    // write, or our own queuing delay lands inside the
+                    // measured network RTT. The host stamps its side in
+                    // its writer for exactly the same reason.
+                    sendEncrypted(out, Protocol.ping(++nonce, nowUs()));
+                    pingsSent++;
+                    nextPingAt = nowUs() + (pingsSent < PING_BURST
+                            ? PING_BURST_INTERVAL_US : PING_STEADY_INTERVAL_US);
+                }
+                // Short poll so the ping schedule stays accurate; input
+                // events still go out the instant they are enqueued.
+                byte[] msg = outbox.poll(100, TimeUnit.MILLISECONDS);
                 if (msg == null) continue;
-                out.write(msg);
-                out.flush();
+                sendEncrypted(out, msg);
             }
         } catch (Exception e) {
             Log.i(TAG, "writer thread stopping: " + e);
         }
+    }
+
+    // ------------------------------------------------------------ noise transport
+
+    /** Encrypts an already-framed plaintext palmtop-proto message and writes
+     * it as one or more Noise wire frames. */
+    private void sendEncrypted(OutputStream out, byte[] framedPlaintext) throws Exception {
+        for (byte[] frame : noise.chunkAndEncrypt(framedPlaintext)) {
+            out.write(frame);
+        }
+        out.flush();
+    }
+
+    /** Blocks for one full decrypted message (possibly reassembled from
+     * several wire chunks). Returns null on a clean EOF at a chunk boundary. */
+    private Protocol.Received recvEncrypted(DataInputStream rawIn) throws Exception {
+        NoiseTransport.Reassembler reassembler = new NoiseTransport.Reassembler();
+        byte[] complete;
+        while (true) {
+            byte[] ciphertext = NoiseTransport.readOneFrame(rawIn);
+            if (ciphertext == null) return null;
+            byte[] plaintext = noise.decryptChunk(ciphertext);
+            complete = reassembler.push(plaintext);
+            if (complete != null) break;
+        }
+        return Protocol.readMessage(new DataInputStream(new ByteArrayInputStream(complete)));
+    }
+
+    private static byte[] hexDecode(String s) {
+        int len = s.length();
+        byte[] out = new byte[len / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
     }
 
     // ------------------------------------------------------------ decode
@@ -633,7 +942,16 @@ public class MainActivity extends Activity {
             }
             @Override
             public void onOutputBufferAvailable(MediaCodec mc, int index, MediaCodec.BufferInfo info) {
+                long outUs = nowUs();
+                long decodeUs = queuedAtUs == 0 ? 0 : outUs - queuedAtUs;
                 inFlight.release();
+                // presentationTimeUs is the host capture time we queued with.
+                // Converting it here (rather than on the way in) keeps the
+                // codec's timestamps monotonic -- see feedDecoder.
+                if (info.presentationTimeUs != 0 && latency.hasOffset()) {
+                    long captureClientUs = info.presentationTimeUs - latency.offsetUs();
+                    latency.recordFrame(outUs - captureClientUs, decodeUs);
+                }
                 mc.releaseOutputBuffer(index, true);
             }
             @Override public void onError(MediaCodec mc, MediaCodec.CodecException e) {
@@ -648,7 +966,16 @@ public class MainActivity extends Activity {
         codec.start();
     }
 
-    private void feedDecoder(byte[] au) {
+    /**
+     * @param captureUs the host's capture timestamp, passed as MediaCodec's
+     *     presentation time so the codec hands it straight back at output --
+     *     no side map needed. Deliberately left on the *host's* monotonic
+     *     clock: converting to client time here would break MediaCodec's
+     *     requirement that presentation timestamps increase monotonically,
+     *     because the clock offset is re-estimated as probes arrive and can
+     *     step backwards.
+     */
+    private void feedDecoder(byte[] au, long captureUs) {
         try {
             if (!inFlight.tryAcquire(500, TimeUnit.MILLISECONDS)) {
                 Log.w(TAG, "decoder saturated -- dropping frame");
@@ -662,10 +989,24 @@ public class MainActivity extends Activity {
             ByteBuffer buf = codec.getInputBuffer(index);
             buf.clear();
             buf.put(au);
-            codec.queueInputBuffer(index, 0, au.length, System.nanoTime() / 1000L, 0);
+            queuedAtUs = nowUs();
+            codec.queueInputBuffer(index, 0, au.length, captureUs, 0);
         } catch (Exception e) {
             Log.e(TAG, "feedDecoder", e);
         }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_SCAN_QR || resultCode != RESULT_OK || data == null) return;
+        String h = data.getStringExtra("host");
+        int p = data.getIntExtra("port", 0);
+        String t = data.getStringExtra("token");
+        String pk = data.getStringExtra("pubkey");
+        if (h == null || p == 0 || t == null || pk == null) return;
+        if (hostDiscovery != null) hostDiscovery.stop();
+        completeConnectionSetup(discoveryRoot, java.util.Collections.singletonList(discoveryOverlayView), h, p, t, pk);
     }
 
     @Override
