@@ -21,98 +21,12 @@
 //! evidence that hardware encode works through it, so `check_vaapi` really
 //! runs ffmpeg and really encodes frames.
 
-use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
 
-/// One diagnostic line. `fix` is only shown on failure, so it can be
-/// specific and long without cluttering a healthy report.
-struct Check {
-    name: String,
-    status: Status,
-    detail: String,
-    fix: Option<String>,
-}
-
-#[derive(PartialEq)]
-enum Status {
-    Pass,
-    Warn,
-    Fail,
-}
-
-impl Status {
-    fn marker(&self) -> &'static str {
-        match self {
-            Status::Pass => "  ok  ",
-            Status::Warn => " warn ",
-            Status::Fail => " FAIL ",
-        }
-    }
-}
-
-struct Report {
-    checks: Vec<Check>,
-}
-
-impl Report {
-    fn new() -> Self {
-        Self { checks: Vec::new() }
-    }
-
-    fn add(&mut self, name: &str, status: Status, detail: impl Into<String>, fix: Option<&str>) {
-        self.checks.push(Check {
-            name: name.to_string(),
-            status,
-            detail: detail.into(),
-            fix: fix.map(|s| s.to_string()),
-        });
-    }
-
-    fn pass(&mut self, name: &str, detail: impl Into<String>) {
-        self.add(name, Status::Pass, detail, None);
-    }
-
-    fn warn(&mut self, name: &str, detail: impl Into<String>, fix: &str) {
-        self.add(name, Status::Warn, detail, Some(fix));
-    }
-
-    fn fail(&mut self, name: &str, detail: impl Into<String>, fix: &str) {
-        self.add(name, Status::Fail, detail, Some(fix));
-    }
-
-    fn failures(&self) -> usize {
-        self.checks.iter().filter(|c| c.status == Status::Fail).count()
-    }
-
-    fn render(&self) -> String {
-        let mut out = String::new();
-        let _ = writeln!(out, "\nPalmtop host diagnostics\n");
-        for c in &self.checks {
-            let _ = writeln!(out, "[{}] {:<22} {}", c.status.marker(), c.name, c.detail);
-        }
-        let problems: Vec<&Check> =
-            self.checks.iter().filter(|c| c.status != Status::Pass).collect();
-        if problems.is_empty() {
-            let _ = writeln!(
-                out,
-                "\nEverything checks out. If the phone still shows nothing, the problem is \
-                 between the two devices rather than on this machine -- run the daemon in the \
-                 foreground (`palmtopd`) and watch its output while the phone connects."
-            );
-        } else {
-            let _ = writeln!(out, "\nWhat to do:\n");
-            for c in problems {
-                if let Some(fix) = &c.fix {
-                    let _ = writeln!(out, "  {}:\n    {}\n", c.name, fix.replace('\n', "\n    "));
-                }
-            }
-        }
-        out
-    }
-}
+use crate::diagnostics::Report;
 
 /// Runs every check and prints the report. Returns a non-zero-worthy bool so
 /// the caller can set an exit code -- scripts should be able to gate on this.

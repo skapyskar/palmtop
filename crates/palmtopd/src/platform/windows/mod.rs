@@ -13,15 +13,20 @@
 //! `capture` and `doctor` land in later phases of the Windows host-support
 //! plan; `input` is the first of the three to exist.
 
-// `keymap`'s public API is only ever called from `input` below, which is
-// Windows-only -- so on every other platform, "nothing calls this" is
-// correct and expected, not a sign of dead code to clean up.
+// `keymap` and `doctor` are both free of the `windows` crate -- pure table
+// lookups/bit arithmetic and std::process calls to ffmpeg/schtasks,
+// respectively -- so both are declared unconditionally for the same reason:
+// their tests should run under plain `cargo test` everywhere, not only on a
+// Windows target this project can cross-compile but not execute. Neither's
+// public API is called from outside `platform::windows` except by `input`/
+// `platform::mod`'s Windows re-export (both Windows-only), so both are
+// legitimately unused on every other platform -- not a sign of dead code.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod keymap;
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod doctor;
 
 #[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
 pub mod input;
-
-// `doctor` lands in a later phase of the Windows host-support plan.

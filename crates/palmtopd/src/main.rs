@@ -1,4 +1,5 @@
 mod capture;
+mod diagnostics;
 mod encode;
 mod modes;
 mod pairing;
