@@ -190,9 +190,11 @@ PALMTOP_CONFIG_DIR="$CONFIG_DIR" "$BIN_DIR/palmtopd" --doctor || {
 if [ "$RELEASE_MODE" = "1" ]; then
   pair_usb="./pair-usb.sh"
   show_qr="./show-pair-qr.sh"
+  choose_encoder="./choose-encoder.sh"
 else
   pair_usb="./scripts/pair-usb.sh"
   show_qr="./scripts/show-pair-qr.sh"
+  choose_encoder="./scripts/choose-encoder.sh"
 fi
 say ""
 say "================================================================"
@@ -213,9 +215,21 @@ say ""
 say "  Logs:  journalctl --user -u palmtopd -f"
 if [ "$RELEASE_MODE" = "1" ]; then
   say "  Check this machine can capture/encode:  ./palmtopd --doctor"
+  say "  Change which encoder is used:           $choose_encoder"
   say "  Remove Palmtop completely:              ./uninstall.sh"
 else
   say "  Check this machine can capture/encode:  palmtopd --doctor"
+  say "  Change which encoder is used:           $choose_encoder"
   say "  Remove Palmtop completely:              ./scripts/uninstall.sh"
 fi
 say ""
+
+# Only worth mentioning when there is a real choice to make. On a machine
+# with exactly one working encoder the menu would just confirm what
+# auto-detection already picked, which is noise at the end of an install.
+if [ "$(PALMTOP_CONFIG_DIR="$CONFIG_DIR" "$BIN_DIR/palmtopd" --list-encoders 2>/dev/null | grep -c '^\[  ok  \]')" -gt 1 ]; then
+  say "  Note: more than one encoder works on this machine. Auto-detection picked"
+  say "  the first one, which isn't necessarily the smoothest -- try the others with"
+  say "  $choose_encoder if the stream feels sluggish."
+  say ""
+fi

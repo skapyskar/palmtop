@@ -160,6 +160,7 @@ jobs:
           cp target/release/palmtopd "dist/$staging/"
           cp scripts/install.sh scripts/uninstall.sh scripts/install-service.sh \
              scripts/pair-usb.sh scripts/show-pair-qr.sh scripts/host-config.sh \
+             scripts/choose-encoder.sh \
              "dist/$staging/"
           chmod +x "dist/$staging"/*.sh
           cp config/host.example.toml "dist/$staging/"
@@ -177,6 +178,18 @@ jobs:
 
   host-windows:
     name: Windows host daemon
+    # DISABLED until the Windows host is actually verified on real hardware.
+    # The code is on master and this job is kept working, but Windows is not
+    # shipped in releases yet and must not gate them -- see the `release`
+    # job's `needs`. Flip this to `true` (and add host-windows back to that
+    # `needs` list) once a real Windows machine has confirmed capture and
+    # input work.
+    #
+    # Also unblocks releases from this job's own flakiness: its first real
+    # run stalled for 12+ minutes inside `apt-get update` against the Azure
+    # Ubuntu mirror, which is nothing to do with this project and would have
+    # held a release hostage.
+    if: false
     # Cross-compiled from an ordinary Linux runner via mingw-w64, rather than
     # a windows-latest runner -- this job only needs to *build* the Windows
     # binary; it can never exercise WGC capture or SendInput either way
@@ -185,6 +198,9 @@ jobs:
     # a real Windows machine, not here. A Linux runner is faster and cheaper
     # for a pure cross-compile.
     runs-on: ubuntu-latest
+    # A stalled apt mirror should fail this job in minutes, not run until the
+    # 6-hour default ceiling.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -252,7 +268,10 @@ jobs:
 
   release:
     name: Publish release
-    needs: [android, host-linux, host-windows]
+    # host-windows is deliberately absent: Windows is built on master but not
+    # shipped until it has been verified on real hardware. Add it back here
+    # (and re-enable the job itself) at that point.
+    needs: [android, host-linux]
     runs-on: ubuntu-latest
     # Only for real tags. A workflow_dispatch run builds and uploads
     # artifacts for inspection but must not create a GitHub Release.
@@ -268,7 +287,6 @@ jobs:
           files: |
             artifacts/android-apk/*.apk
             artifacts/linux-host/*.tar.gz
-            artifacts/windows-host/*.zip
           generate_release_notes: true
           body: |
             ## Install
@@ -296,15 +314,15 @@ jobs:
             ./show-pair-qr.sh
             ```
 
-            **Laptop (Windows)** — download the `.zip`, extract it, and run in
-            PowerShell:
+            If more than one encoder works on your machine, it is worth
+            trying the others — auto-detection picks the first that works,
+            not necessarily the smoothest:
 
             ```
-            .\install.ps1
+            ./choose-encoder.sh
             ```
-
-            Then pair by installing the app on your phone and, in the app,
-            Devices → Add by scanning QR — the code is written to
-            `%TEMP%\palmtop-pair.svg` on install.
 
             Full setup guide in the README.
+
+            *(A Windows host exists in the source tree but is not shipped
+            yet — it has not been verified on real hardware.)*

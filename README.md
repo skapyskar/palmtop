@@ -240,6 +240,36 @@ The app tells the laptop its screen size, refresh rate and decoder limits when
 it connects, and the laptop sizes the stream to match. There is nothing to
 configure per phone.
 
+### Choosing the encoder
+
+The laptop finds a working hardware encoder by itself, so this needs no
+attention until it does. But it picks the **first** one that works, and on a
+machine where several work — a hybrid-GPU laptop with both an iGPU and a
+discrete NVIDIA card, say — that is not necessarily the one that feels best.
+They differ in latency, power draw, fan noise and picture quality, and which
+trade-off you want depends on things no probe can see.
+
+See what your machine can actually do:
+
+```bash
+palmtopd --list-encoders
+```
+
+Then either pick one directly, or use the menu:
+
+```bash
+palmtopd --set-encoder h264_nvenc
+./choose-encoder.sh              # same thing, with a menu and a restart
+```
+
+Valid values are `auto` (the default), `h264_vaapi`, `h264_nvenc`,
+`h264_qsv`, `h264_amf` and `libx264`. A pinned encoder that later stops
+working — driver update, GPU swapped out — falls back to auto-detection with
+a loud warning rather than refusing to stream.
+
+If the stream feels sluggish and **Sync** mode didn't fix it, this is the
+next thing worth trying.
+
 ---
 
 ## If something goes wrong

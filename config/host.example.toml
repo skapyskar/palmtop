@@ -18,16 +18,29 @@ port = 9999
 vaapi_render_node = "/dev/dri/renderD128"
 
 [encode]
-# "h264_vaapi" (the default) means "figure it out": palmtopd tries VA-API on
-# every render node, then NVENC, then software libx264, and uses whichever
-# actually works on this machine -- see `palmtopd --doctor` to check all
-# three, and the daemon's own startup log for which one it picked. Set this
-# explicitly only to pin one:
-#   "h264_nvenc"  -- force NVENC (skips VA-API entirely)
-#   "libx264"     -- force software encoding (real CPU cost, but works
-#                    almost anywhere -- useful if a hardware encoder is
-#                    technically available but you want the fallback anyway)
-codec = "h264_vaapi"
+# Which encoder to stream through. See what this machine can actually do:
+#   palmtopd --list-encoders
+# and pick one (or use ./choose-encoder.sh for a menu):
+#   palmtopd --set-encoder h264_nvenc
+#
+#   "auto"        -- try each in turn, use the first that works (the default)
+#   "h264_vaapi"  -- VA-API, on the render node set in [gpu] above
+#   "h264_nvenc"  -- NVENC, on an NVIDIA GPU
+#   "h264_qsv"    -- Intel Quick Sync
+#   "h264_amf"    -- AMD AMF
+#   "libx264"     -- software encoding (real CPU cost, but works almost
+#                    anywhere -- useful if a hardware encoder is technically
+#                    available but you want the fallback anyway)
+#
+# Worth pinning rather than leaving on "auto" if you have more than one
+# working option: auto-detection picks the first that *works*, which is not
+# necessarily the one that *feels* best. On a hybrid-GPU laptop the iGPU and
+# the dGPU differ in latency, power draw, and fan noise, and which trade-off
+# you want is not something a probe can decide for you.
+#
+# A pinned encoder that stops working (driver update, GPU swapped out) falls
+# back to auto-detection with a loud warning rather than refusing to stream.
+codec = "auto"
 qp    = 24
 fps   = 30
 # VA-API frame-pipelining depth. Lower = less input-to-screen lag, at the cost

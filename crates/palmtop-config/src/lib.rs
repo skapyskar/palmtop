@@ -237,41 +237,32 @@ impl HostConfig {
     pub fn resolved_encode_backend(&self) -> Result<EncodeBackend> {
         let configured = self.encode.codec.trim();
 
-        if configured == EncodeBackend::Nvenc.codec_name() {
-            if nvenc_encodes() {
-                return Ok(EncodeBackend::Nvenc);
+        // An explicit pin is tried first, and *every* backend is pinnable the
+        // same way -- including VA-API, which used to be impossible to pin
+        // because "h264_vaapi" was overloaded to also mean "figure it out".
+        // Auto-detection picks the first backend that works, which is not
+        // necessarily the one that feels best: on a hybrid laptop, iGPU
+        // VA-API and dGPU NVENC differ in latency, power draw, and quality in
+        // ways only the person watching the stream can judge. Hence a real
+        // choice -- see `palmtopd --list-encoders`.
+        if !configured.is_empty() && configured != AUTO_CODEC {
+            if let Some(backend) = self.pinned_backend(configured) {
+                return Ok(backend);
             }
+            // Warn and fall through rather than bail: a pin that stops working
+            // (driver update, GPU swapped out, eGPU unplugged) should degrade
+            // to a working stream with a loud explanation, not to no stream at
+            // all. This is also what makes changing the template default to
+            // "auto" safe for every host.toml already in the wild carrying the
+            // old "h264_vaapi" value.
             eprintln!(
-                "[gpu] configured codec {configured} does not work on this machine -- \
-                 falling back to auto-detection."
-            );
-        } else if configured == EncodeBackend::Software.codec_name() {
-            if software_encodes() {
-                return Ok(EncodeBackend::Software);
-            }
-            eprintln!(
-                "[gpu] configured codec {configured} does not work on this machine (is ffmpeg \
-                 built with libx264?) -- falling back to auto-detection."
-            );
-        } else if configured == EncodeBackend::Qsv.codec_name() {
-            if qsv_encodes() {
-                return Ok(EncodeBackend::Qsv);
-            }
-            eprintln!(
-                "[gpu] configured codec {configured} does not work on this machine -- \
-                 falling back to auto-detection."
-            );
-        } else if configured == EncodeBackend::Amf.codec_name() {
-            if amf_encodes() {
-                return Ok(EncodeBackend::Amf);
-            }
-            eprintln!(
-                "[gpu] configured codec {configured} does not work on this machine -- \
-                 falling back to auto-detection."
+                "[gpu] configured codec {configured} does not work on this machine -- falling \
+                 back to auto-detection. Run `palmtopd --list-encoders` to see what does work \
+                 here, and `palmtopd --set-encoder <codec>` to pin one of those instead."
             );
         }
 
-        // Anything else, including the unconfigured default (h264_vaapi), is
+        // "auto" (and an empty/unrecognised value) is
         // "figure it out". The order tried is platform-specific because the
         // *cheapest-when-it-works* backend differs: VA-API on Linux, Quick
         // Sync/NVENC/AMF on Windows (all GPU vendors get a real hardware
@@ -330,6 +321,162 @@ impl HostConfig {
             );
         }
     }
+
+    /// The backend `codec` names, if it actually works on this machine.
+    /// `None` covers both "unknown name" and "known but not working here" --
+    /// the caller treats them the same way (warn, fall back to auto), and
+    /// distinguishing them would only matter for a typo, which
+    /// `--set-encoder` already rejects up front.
+    fn pinned_backend(&self, codec: &str) -> Option<EncodeBackend> {
+        match codec {
+            "h264_vaapi" => working_vaapi_node(&self.gpu.vaapi_render_node, "h264_vaapi")
+                .map(|render_node| EncodeBackend::Vaapi { render_node }),
+            "h264_nvenc" => nvenc_encodes().then_some(EncodeBackend::Nvenc),
+            "h264_qsv" => qsv_encodes().then_some(EncodeBackend::Qsv),
+            "h264_amf" => amf_encodes().then_some(EncodeBackend::Amf),
+            "libx264" => software_encodes().then_some(EncodeBackend::Software),
+            _ => {
+                eprintln!(
+                    "[gpu] unknown codec {codec:?} in host.toml -- valid values are {}.",
+                    selectable_codecs().join(", ")
+                );
+                None
+            }
+        }
+    }
+
+    /// Probes every backend Palmtop knows, in the order auto-detection would
+    /// try them, and reports which actually work **by encoding through each
+    /// one** -- the same rule `--doctor` follows, for the same reason: a
+    /// menu that offers a backend this machine cannot actually use is worse
+    /// than no menu.
+    ///
+    /// Costs a few hundred milliseconds per backend, which is why it is a
+    /// deliberate command (`--list-encoders`) rather than something the
+    /// daemon does on every start.
+    pub fn probe_backends(&self) -> Vec<BackendProbe> {
+        let mut out = Vec::new();
+
+        let vaapi_node = working_vaapi_node(&self.gpu.vaapi_render_node, "h264_vaapi");
+        out.push(BackendProbe {
+            codec: "h264_vaapi",
+            label: match &vaapi_node {
+                Some(node) => format!("VA-API on {node}"),
+                None => "VA-API (Intel/AMD GPU)".to_string(),
+            },
+            works: vaapi_node.is_some(),
+        });
+        out.push(BackendProbe {
+            codec: "h264_nvenc",
+            label: "NVENC (NVIDIA GPU)".to_string(),
+            works: nvenc_encodes(),
+        });
+        out.push(BackendProbe {
+            codec: "h264_qsv",
+            label: "Intel Quick Sync (QSV)".to_string(),
+            works: qsv_encodes(),
+        });
+        out.push(BackendProbe {
+            codec: "h264_amf",
+            label: "AMD AMF".to_string(),
+            works: amf_encodes(),
+        });
+        out.push(BackendProbe {
+            codec: "libx264",
+            label: "software (libx264) -- works almost anywhere, costs real CPU".to_string(),
+            works: software_encodes(),
+        });
+        out
+    }
+}
+
+/// One row of `--list-encoders`: a backend, whether this machine can really
+/// use it, and how to name it in host.toml.
+pub struct BackendProbe {
+    /// The exact value to put in `[encode] codec`.
+    pub codec: &'static str,
+    pub label: String,
+    pub works: bool,
+}
+
+/// The `[encode] codec` value meaning "try everything, use what works".
+pub const AUTO_CODEC: &str = "auto";
+
+/// Every value `[encode] codec` accepts, for validation and help text.
+pub fn selectable_codecs() -> Vec<&'static str> {
+    vec![AUTO_CODEC, "h264_vaapi", "h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
+}
+
+/// Rewrites `[encode] codec` in host.toml, in place, preserving every comment
+/// and every other value in the file.
+///
+/// Deliberately edits the text rather than re-serialising the parsed config:
+/// `host.toml` is a file humans read and annotate (the template is most of
+/// the way to documentation), and a round-trip through `toml::to_string`
+/// would discard all of it. Handles the three shapes a real file can take --
+/// an `[encode]` section with a `codec` line, one without, and no `[encode]`
+/// section at all -- and matches only a genuine section header, never a
+/// mention of `[encode]` inside a comment. That last part is not
+/// hypothetical: the same substring-vs-real-header mistake in the `[pairing]`
+/// generator once crash-looped the daemon by appending a duplicate key on
+/// every restart (see `HostConfig::load`).
+pub fn set_configured_codec(codec: &str) -> Result<PathBuf> {
+    if !selectable_codecs().contains(&codec) {
+        bail!(
+            "unknown codec {codec:?} -- valid values are {}",
+            selectable_codecs().join(", ")
+        );
+    }
+    let path = config_dir()?.join("host.toml");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    std::fs::write(&path, rewrite_codec(&text, codec))
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+/// The pure half of [`set_configured_codec`], so the file-shape handling is
+/// testable without touching a real config.
+fn rewrite_codec(text: &str, codec: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let is_header = |l: &str| {
+        let t = l.trim();
+        t.starts_with('[') && t.ends_with(']')
+    };
+    let new_line = format!("codec = \"{codec}\"");
+
+    match lines.iter().position(|l| l.trim() == "[encode]") {
+        Some(start) => {
+            // The section runs until the next header, or to end of file.
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(start + 1)
+                .find(|(_, l)| is_header(l))
+                .map(|(i, _)| i)
+                .unwrap_or(lines.len());
+            // `split('=')` on a commented-out `# codec = ...` yields "# codec",
+            // which correctly does not match -- so a commented example line is
+            // left alone rather than being silently uncommented and rewritten.
+            let existing = (start + 1..end)
+                .find(|&i| lines[i].split('=').next().map(str::trim) == Some("codec"));
+            match existing {
+                Some(i) => lines[i] = new_line,
+                None => lines.insert(start + 1, new_line),
+            }
+        }
+        None => {
+            if !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+                lines.push(String::new());
+            }
+            lines.push("[encode]".to_string());
+            lines.push(new_line);
+        }
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Which real encoder this machine will run through, and what `encode::spawn`
@@ -766,6 +913,107 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), names.len(), "two backends share a codec_name: {names:?}");
+    }
+
+    // --- rewrite_codec: the three real file shapes, plus the traps ---------
+
+    #[test]
+    fn rewriting_replaces_an_existing_codec_line_and_keeps_everything_else() {
+        let before = "[host]\nport = 9999\n\n[encode]\n# a comment\ncodec = \"h264_vaapi\"\nfps = 30\n";
+        let after = rewrite_codec(before, "h264_nvenc");
+        assert!(after.contains("codec = \"h264_nvenc\""));
+        assert!(!after.contains("h264_vaapi"));
+        // Neighbouring keys, comments, and other sections must survive --
+        // this file is documentation as much as configuration.
+        assert!(after.contains("# a comment"));
+        assert!(after.contains("fps = 30"));
+        assert!(after.contains("port = 9999"));
+    }
+
+    #[test]
+    fn rewriting_inserts_a_codec_line_when_the_encode_section_has_none() {
+        let before = "[host]\nport = 9999\n\n[encode]\nfps = 30\n";
+        let after = rewrite_codec(before, "libx264");
+        assert!(after.contains("codec = \"libx264\""));
+        assert!(after.contains("fps = 30"));
+        // Inserted *inside* [encode], not after [host] and not at EOF -- a
+        // bare key attaches to whichever table is physically open above it,
+        // so position is correctness here, not tidiness.
+        let enc = after.find("[encode]").unwrap();
+        let codec = after.find("codec =").unwrap();
+        assert!(codec > enc, "codec line landed outside [encode]:\n{after}");
+    }
+
+    #[test]
+    fn rewriting_appends_a_whole_section_when_there_is_no_encode_table() {
+        let before = "[host]\nport = 9999\n";
+        let after = rewrite_codec(before, "h264_qsv");
+        assert!(after.contains("[encode]"));
+        assert!(after.contains("codec = \"h264_qsv\""));
+        assert!(toml::from_str::<toml::Value>(&after).is_ok(), "produced invalid TOML:\n{after}");
+    }
+
+    #[test]
+    fn a_mention_of_encode_inside_a_comment_is_not_mistaken_for_the_section() {
+        // Exactly the class of bug that crash-looped the daemon once already,
+        // via the [pairing] generator's naive text.contains() check.
+        let before = "[host]\nport = 9999\n# the [encode] section is generated below\n";
+        let after = rewrite_codec(before, "h264_amf");
+        assert!(toml::from_str::<toml::Value>(&after).is_ok(), "produced invalid TOML:\n{after}");
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(parsed["encode"]["codec"].as_str(), Some("h264_amf"));
+    }
+
+    #[test]
+    fn a_commented_out_codec_line_is_left_alone_not_uncommented() {
+        let before = "[encode]\n# codec = \"libx264\"\nfps = 30\n";
+        let after = rewrite_codec(before, "h264_nvenc");
+        assert!(after.contains("# codec = \"libx264\""), "clobbered the commented example:\n{after}");
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(parsed["encode"]["codec"].as_str(), Some("h264_nvenc"));
+    }
+
+    #[test]
+    fn the_section_boundary_is_respected_when_encode_is_not_last() {
+        // A `codec` key in a *later* section must not be the one rewritten.
+        let before = "[encode]\nfps = 30\n\n[other]\ncodec = \"do-not-touch\"\n";
+        let after = rewrite_codec(before, "libx264");
+        assert!(after.contains("codec = \"do-not-touch\""), "rewrote the wrong section:\n{after}");
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(parsed["encode"]["codec"].as_str(), Some("libx264"));
+        assert_eq!(parsed["other"]["codec"].as_str(), Some("do-not-touch"));
+    }
+
+    #[test]
+    fn rewriting_the_real_template_round_trips_to_valid_toml() {
+        // The shipped template is the file most users will actually have.
+        let template = include_str!("../../../config/host.example.toml");
+        for codec in selectable_codecs() {
+            let after = rewrite_codec(template, codec);
+            let parsed: toml::Value =
+                toml::from_str(&after).unwrap_or_else(|e| panic!("{codec}: invalid TOML: {e}\n{after}"));
+            assert_eq!(parsed["encode"]["codec"].as_str(), Some(codec));
+        }
+    }
+
+    #[test]
+    fn every_selectable_codec_is_a_real_backend_name_or_auto() {
+        // Guards the menu against offering a value resolved_encode_backend
+        // would then reject as unknown -- which would present as "I picked
+        // NVENC and it silently used something else".
+        for codec in selectable_codecs() {
+            if codec == AUTO_CODEC {
+                continue;
+            }
+            let known = [
+                EncodeBackend::Vaapi { render_node: String::new() }.codec_name(),
+                EncodeBackend::Nvenc.codec_name(),
+                EncodeBackend::Qsv.codec_name(),
+                EncodeBackend::Amf.codec_name(),
+                EncodeBackend::Software.codec_name(),
+            ];
+            assert!(known.contains(&codec), "{codec} is offered but is not a real backend");
+        }
     }
 
     #[test]
