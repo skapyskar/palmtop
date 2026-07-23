@@ -41,6 +41,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(not(windows))]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
@@ -57,8 +58,13 @@ const SERVICE_TYPE: &str = "_palmtop._tcp.local.";
 pub fn advertise(port: u16, protocol_version: u16, noise_pubkey_hex: &str) -> Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("start mDNS responder")?;
 
+    // `HOSTNAME` and `/etc/hostname` are both Linux conventions; Windows
+    // sets neither, but always sets `COMPUTERNAME` -- tried third so an
+    // explicitly-set `HOSTNAME` (rare but possible under e.g. WSL-adjacent
+    // tooling) still wins on either platform.
     let hostname = std::env::var("HOSTNAME")
         .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
+        .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "palmtop-host".to_string());
     let instance_name = format!("Palmtop on {hostname}");
 
@@ -132,12 +138,28 @@ pub fn render_connect_info(host: &str, port: u16, token: &str, noise_pubkey_hex:
     ))
 }
 
-/// Writes the QR as an SVG to `$XDG_RUNTIME_DIR/palmtop-pair.svg`, 0600.
+/// Writes the QR as an SVG next to it embeds the pairing token, so it needs
+/// to land somewhere private and short-lived, not a home directory where it
+/// would outlive its use.
 ///
 /// SVG rather than PNG because `qrcode`'s svg renderer needs no dependency
 /// beyond what's already compiled in, and vector output means the code stays
 /// crisp however far the viewer zooms -- which is the entire point of the file.
+///
+/// The two platforms disagree on where "private and short-lived" lives, and
+/// on how to say "owner-only" at all:
+///   - **Linux**: `$XDG_RUNTIME_DIR`, a user-private tmpfs the session wipes
+///     on logout, explicitly `chmod 0600`'d on create.
+///   - **Windows**: `%TEMP%` (there is no tmpfs-on-logout equivalent, so this
+///     is "short-lived by convention" rather than guaranteed-wiped). No
+///     explicit permissioning call: NTFS ACLs on a per-user profile
+///     directory are already owner-only by default, and `OpenOptionsExt::
+///     mode` -- the Unix permission-bits API used below -- doesn't exist on
+///     Windows to call in the first place.
 fn write_qr_svg(code: &QrCode) -> Result<PathBuf> {
+    #[cfg(windows)]
+    let dir = std::env::temp_dir();
+    #[cfg(not(windows))]
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .context("XDG_RUNTIME_DIR is not set")?;
@@ -149,13 +171,15 @@ fn write_qr_svg(code: &QrCode) -> Result<PathBuf> {
         .quiet_zone(true)
         .build();
 
+    let mut open_opts = OpenOptions::new();
+    open_opts.write(true).create(true).truncate(true);
     // Create with 0600 up front rather than writing then chmod-ing, so the
     // token is never briefly readable by other users on the machine.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    // Linux-only: see this function's doc comment for why Windows has no
+    // equivalent call here.
+    #[cfg(not(windows))]
+    open_opts.mode(0o600);
+    let mut file = open_opts
         .open(&path)
         .with_context(|| format!("create {}", path.display()))?;
     file.write_all(svg.as_bytes())
