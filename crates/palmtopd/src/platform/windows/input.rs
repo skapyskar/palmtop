@@ -125,7 +125,13 @@ fn send_mouse(dx: i32, dy: i32, mouse_data: i32, flags: windows::Win32::UI::Inpu
             mi: MOUSEINPUT {
                 dx,
                 dy,
-                mouseData: mouse_data,
+                // `mouseData` is typed u32, but for MOUSEEVENTF_WHEEL/HWHEEL
+                // Win32 reads it back as a *signed* delta -- scrolling up and
+                // scrolling left are negative. The cast is the two's-complement
+                // reinterpretation the API expects, not a lossy conversion, so
+                // the parameter stays i32 and is narrowed only here at the
+                // boundary.
+                mouseData: mouse_data as u32,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: extra,

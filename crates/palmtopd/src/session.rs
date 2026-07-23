@@ -232,8 +232,19 @@ fn configure_socket(stream: &TcpStream) {
     stream.set_nodelay(true).ok();
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(Duration::from_secs(15))
-        .with_interval(Duration::from_secs(5))
-        .with_retries(3);
+        .with_interval(Duration::from_secs(5));
+    // Windows (and a few BSDs) don't let the retry count be set per-socket,
+    // so socket2 doesn't expose the setter there at all. Not a behavioural
+    // gap worth working around: the time and interval above are what
+    // actually bound how long a vanished phone can wedge a session, and
+    // Windows applies its own fixed retry count on top of them.
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "solaris"
+    )))]
+    let keepalive = keepalive.with_retries(3);
     if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive) {
         eprintln!("[net] could not enable TCP keepalive: {e} (a dead client may linger)");
     }

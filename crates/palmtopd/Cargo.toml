@@ -36,16 +36,29 @@ xkbcommon = "0.8"
 # dependency: less surface area to compile on a target this crate can't be
 # checked against locally.
 [target.'cfg(windows)'.dependencies]
+# Feature names here are load-bearing in a way that is easy to get wrong:
+# windows-rs gates individual *items* on the feature that provides their
+# parameter/field types, not just on the module they live in. Three separate
+# "not found" errors on the first real Windows build all traced back to two
+# missing features rather than to wrong API names --
+#   - D3D11_TEXTURE2D_DESC and ID3D11Device::CreateTexture2D are behind
+#     Win32_Graphics_Dxgi_Common (the desc struct embeds DXGI_FORMAT), and
+#   - Direct3D11CaptureFramePool::CreateFreeThreaded and
+#     Direct3D11CaptureFrame::Surface are behind Graphics_DirectX_Direct3D11
+#     (they take/return IDirect3DDevice and IDirect3DSurface).
+# Deepest feature listed wins: Graphics_DirectX_Direct3D11 implies
+# Graphics_DirectX, which implies Graphics.
 windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
     "Graphics_Capture",
-    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
     "Foundation",
 ] }
