@@ -18,6 +18,7 @@ final class Keycodes {
     private Keycodes() {}
 
     // Linux evdev keycodes, from linux/input-event-codes.h.
+    static final int KEY_ESC = 1;
     static final int KEY_BACKSPACE = 14;
     static final int KEY_TAB = 15;
     static final int KEY_ENTER = 28;
@@ -30,6 +31,16 @@ final class Keycodes {
     static final int KEY_LEFTSHIFT = 42;
     static final int KEY_LEFTALT = 56;
     static final int KEY_LEFTMETA = 125;
+
+    // Media keys. These carry XF86AudioRaiseVolume / LowerVolume / Mute in
+    // the "us" keymap palmtopd uploads (verified against the compiled
+    // keymap: evdev 115 becomes xkb <VOL+> = 123). Whether pressing them
+    // actually changes the volume is then up to the desktop's own bindings
+    // -- GNOME and KDE bind these out of the box, but a bare wlroots
+    // compositor such as Hyprland or Sway only does if its config says so.
+    static final int KEY_MUTE = 113;
+    static final int KEY_VOLUMEDOWN = 114;
+    static final int KEY_VOLUMEUP = 115;
 
     private static final Map<Character, int[]> MAP = new HashMap<>(); // {evdevCode, needsShift}
 

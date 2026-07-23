@@ -131,6 +131,7 @@ The left column keeps only what you use during a session:
 | **Joystick** | Nudge the cursor precisely, for window edges and text carets |
 | **L** / **R** | Left and right click, wherever the cursor currently is |
 | **Ctrl Alt Shift ❖** | Modifier keys — tap to latch, tap again to release |
+| **Esc** / **Tab** | The two keys no phone keyboard has. Latch Alt + tap Tab = Alt+Tab |
 
 Tapping the video still clicks exactly where you tapped — the joystick is an
 addition, not a replacement. It is there for the things a fingertip is too
@@ -167,6 +168,7 @@ Everything else lives behind **⚙**:
 | **🖥 Devices** | Switch laptops, or pair another |
 | **⚙ Mode** | Quality preset — see below |
 | **▭ Aspect** | Best Fit / 16:9 / 4:3 / 1:1 |
+| **🔊 Volume** | Mute / down / up on the laptop |
 | **🕹 Sensitivity** | How fast the joystick moves the cursor |
 | **📋 Session log** | What the laptop is doing, and what failed |
 | **📊 Stats** | Live latency figures |
@@ -224,6 +226,22 @@ Check USB debugging is on, the cable carries data (some charge-only cables do
 not), and that you accepted the "Allow USB debugging?" prompt on the phone.
 `./adb-tools/adb devices` (the release tarball bundles its own `adb`, so no
 separate install is needed) should list it.
+
+**The volume buttons do nothing.**
+They send the same `XF86AudioRaiseVolume` / `LowerVolume` / `Mute` key presses
+your laptop's own volume keys do — but a key only does something if your
+desktop *binds* it. GNOME and KDE bind them out of the box. A bare wlroots
+compositor does not, so on **Hyprland** or **Sway** you need the binding in
+your own config, for example:
+
+```
+# Hyprland
+bindl = , XF86AudioRaiseVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
+bindl = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+bindl = , XF86AudioMute,        exec, wpctl set-mute   @DEFAULT_AUDIO_SINK@ toggle
+```
+
+Once those work from the laptop's own keyboard, they work from the phone.
 
 **It connected once and now will not.**
 Your laptop's IP probably changed. Re-pair — the saved entry updates in place

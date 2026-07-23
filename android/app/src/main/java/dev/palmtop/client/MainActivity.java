@@ -415,7 +415,7 @@ public class MainActivity extends Activity {
 
         JoystickView stick = new JoystickView(this);
         stick.setListener(cursorDriver::setVector);
-        int size = Ui.dp(this, 128);
+        int size = Ui.dp(this, JOYSTICK_SIZE_DP);
         LinearLayout.LayoutParams stickLp = new LinearLayout.LayoutParams(size, size);
         stickLp.gravity = Gravity.CENTER_HORIZONTAL;
         stickLp.bottomMargin = Ui.sm(this);
@@ -436,6 +436,14 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         buildModifierBar();
+
+        // Esc and Tab: the two keys a desktop needs constantly that no phone
+        // IME offers. Placed after the modifier bar deliberately -- latch Alt
+        // and tap Tab for a real Alt+Tab, so the two rows read as one group.
+        joystickSlot.addView(
+                twoUp("Esc", () -> sendKeyTap(Keycodes.KEY_ESC),
+                      "Tab", () -> sendKeyTap(Keycodes.KEY_TAB)),
+                Ui.stacked(this, 6));
     }
 
     /**
@@ -554,13 +562,54 @@ public class MainActivity extends Activity {
         enqueue(Protocol.pointerButton(protoButton, pressed));
     }
 
-    /** Equal-width slot in the icon row. Weighted with a zero base width so
-     *  the three share the column exactly, whatever glyph each one carries. */
+    /** Height of every button in the column, and the joystick pad's size.
+     *
+     *  <p>Both trimmed from their first values (42dp / 128dp) to buy vertical
+     *  room for more controls. The column is the only place controls can go
+     *  -- widening it would narrow the video, which is not on the table -- so
+     *  every new button has to be paid for out of the existing height. 34dp
+     *  is still above the ~32dp that reads as comfortably tappable at this
+     *  width; going further would start trading correctness for capacity. */
+    private static final int BUTTON_HEIGHT_DP = 34;
+    private static final int JOYSTICK_SIZE_DP = 96;
+
+    /** Equal-width slot in an icon row. Weighted with a zero base width so
+     *  the buttons share the column exactly, whatever glyph each one carries. */
     private LinearLayout.LayoutParams iconSlot(int leftMargin) {
         LinearLayout.LayoutParams lp =
-                new LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f);
+                new LinearLayout.LayoutParams(0, Ui.dp(this, BUTTON_HEIGHT_DP), 1f);
         lp.leftMargin = leftMargin;
         return lp;
+    }
+
+    /** A two-up row of buttons in the column -- the shape every control pair
+     *  here uses, so the layout stays one consistent grid rather than each
+     *  addition inventing its own spacing. */
+    private LinearLayout twoUp(String leftLabel, Runnable onLeft,
+                               String rightLabel, Runnable onRight) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        Button left = Ui.iconButton(this, leftLabel);
+        left.setOnClickListener(v -> onLeft.run());
+        row.addView(left, iconSlot(0));
+        Button right = Ui.iconButton(this, rightLabel);
+        right.setOnClickListener(v -> onRight.run());
+        row.addView(right, iconSlot(Ui.dp(this, 6)));
+        return row;
+    }
+
+    /**
+     * Sends one complete key press and release, carrying whatever modifiers
+     * are currently latched.
+     *
+     * <p>Carrying the latch is what makes the combinations work: latch Alt,
+     * tap Tab, and you get a real Alt+Tab rather than a bare Tab that does
+     * nothing useful.
+     */
+    private void sendKeyTap(int keycode) {
+        int mods = modifiers.mask();
+        enqueue(Protocol.key(keycode, true, mods));
+        enqueue(Protocol.key(keycode, false, mods));
     }
 
     /**
@@ -1030,6 +1079,8 @@ public class MainActivity extends Activity {
         content.addView(aspectButton, Ui.stacked(this, 6));
         updateAspectButton();
 
+        content.addView(buildVolumeRow(), Ui.stacked(this, 6));
+
         content.addView(buildSensitivityRow(), Ui.stacked(this, 6));
 
         logButton = Ui.button(this, "📋  Session log");
@@ -1053,6 +1104,52 @@ public class MainActivity extends Activity {
         settingsOverlayView = overlay;
         rootLayout.addView(overlay, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    /**
+     * Laptop volume: mute, down, up.
+     *
+     * <p>These are ordinary key events -- evdev 113/114/115, which the "us"
+     * keymap palmtopd uploads carries as XF86AudioMute / LowerVolume /
+     * RaiseVolume (confirmed against the compiled keymap, where evdev 115
+     * appears as {@code <VOL+>}). So this needed no host change and no new
+     * message: the laptop simply receives the same key press its own keyboard
+     * would send.
+     *
+     * <p>The honest caveat, and it is worth stating rather than discovering:
+     * pressing the key only changes the volume if the desktop <em>binds</em>
+     * it. GNOME and KDE do out of the box; a bare wlroots compositor such as
+     * Hyprland or Sway only does if its config says so. If nothing happens,
+     * that is the reason, and the fix belongs in the compositor's config
+     * rather than here.
+     */
+    private LinearLayout buildVolumeRow() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(Ui.rect(Ui.RAISED, 10f, this));
+        box.setPadding(Ui.md(this), Ui.md(this), Ui.md(this), Ui.md(this));
+
+        TextView label = Ui.body(this, "🔊  Laptop volume");
+        label.setTypeface(Ui.medium());
+        box.addView(label, Ui.stacked(this, 8));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+
+        Button mute = Ui.iconButton(this, "🔇");
+        mute.setOnClickListener(v -> sendKeyTap(Keycodes.KEY_MUTE));
+        row.addView(mute, iconSlot(0));
+
+        Button down = Ui.iconButton(this, "−");
+        down.setOnClickListener(v -> sendKeyTap(Keycodes.KEY_VOLUMEDOWN));
+        row.addView(down, iconSlot(Ui.dp(this, 6)));
+
+        Button up = Ui.iconButton(this, "+");
+        up.setOnClickListener(v -> sendKeyTap(Keycodes.KEY_VOLUMEUP));
+        row.addView(up, iconSlot(Ui.dp(this, 6)));
+
+        box.addView(row);
+        return box;
     }
 
     /**
