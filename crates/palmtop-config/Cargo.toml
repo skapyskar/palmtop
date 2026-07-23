@@ -10,3 +10,10 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 palmtop-proto = { path = "../palmtop-proto" }
+
+# Only BCryptGenRandom (the token/keypair generator's Windows arm) needs
+# this -- kept to that one feature rather than pulling in the broad
+# "Win32" feature set, since every extra feature is more surface area to
+# compile on a target this crate can't be checked against locally.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Security_Cryptography"] }

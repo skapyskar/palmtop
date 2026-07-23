@@ -174,14 +174,18 @@ pub fn spawn(
 }
 
 /// Arguments that must appear *before* `-i`: hardware device init for
-/// VA-API, nothing for NVENC/software (ffmpeg's nvenc/libx264 encoders take
-/// plain frames directly -- no device handle to set up first).
+/// VA-API, nothing for NVENC/QSV/AMF/software (all four take plain frames
+/// from system memory directly -- only VA-API's zero-copy path needs a
+/// device handle set up before the first frame arrives).
 fn hwaccel_args(backend: &palmtop_config::EncodeBackend) -> Vec<String> {
     match backend {
         palmtop_config::EncodeBackend::Vaapi { render_node } => {
             vec!["-init_hw_device".to_string(), format!("vaapi=va:{render_node}")]
         }
-        palmtop_config::EncodeBackend::Nvenc | palmtop_config::EncodeBackend::Software => vec![],
+        palmtop_config::EncodeBackend::Nvenc
+        | palmtop_config::EncodeBackend::Qsv
+        | palmtop_config::EncodeBackend::Amf
+        | palmtop_config::EncodeBackend::Software => vec![],
     }
 }
 
@@ -205,7 +209,9 @@ fn filter_and_scale(
             let scale = if scaling { format!(",scale_vaapi={width}:{height}") } else { String::new() };
             format!("format=nv12,hwupload{scale}")
         }
-        palmtop_config::EncodeBackend::Nvenc => {
+        palmtop_config::EncodeBackend::Nvenc
+        | palmtop_config::EncodeBackend::Qsv
+        | palmtop_config::EncodeBackend::Amf => {
             let scale = if scaling { format!(",scale={width}:{height}") } else { String::new() };
             format!("format=nv12{scale}")
         }
@@ -218,8 +224,8 @@ fn filter_and_scale(
 }
 
 /// Bitrate/VBV flags. Same target numbers everywhere (see this function's
-/// caller's doc comment for why); only the flag *names* VA-API/NVENC/libx264
-/// use to mean "VBR with this ceiling and this window" differ.
+/// caller's doc comment for why); only the flag *names* each backend uses to
+/// mean "VBR with this ceiling and this window" differ.
 fn rate_control_args(
     backend: &palmtop_config::EncodeBackend,
     target_kbps: u32,
@@ -233,6 +239,16 @@ fn rate_control_args(
         palmtop_config::EncodeBackend::Nvenc => {
             vec!["-rc".to_string(), "vbr".to_string()]
         }
+        // AMD's h264_amf spells the same idea "latency-constrained VBR" --
+        // the option ffmpeg documents for AMF specifically, rather than the
+        // generic "vbr" NVENC uses.
+        palmtop_config::EncodeBackend::Amf => {
+            vec!["-rc".to_string(), "vbr_latency".to_string()]
+        }
+        // QSV has no separate rc-mode flag either, same as libx264 below:
+        // -b:v alone selects VBR-like behavior, and -maxrate/-bufsize below
+        // constrain it exactly like every other backend here.
+        palmtop_config::EncodeBackend::Qsv => vec![],
         // libx264 has no separate rc-mode flag: -b:v alone selects ABR, and
         // -maxrate/-bufsize below constrain it exactly like the other two.
         palmtop_config::EncodeBackend::Software => {
@@ -545,6 +561,8 @@ mod tests {
     fn only_vaapi_gets_a_hwaccel_device() {
         assert_eq!(hwaccel_args(&vaapi()), vec!["-init_hw_device", "vaapi=va:/dev/dri/renderD128"]);
         assert!(hwaccel_args(&palmtop_config::EncodeBackend::Nvenc).is_empty());
+        assert!(hwaccel_args(&palmtop_config::EncodeBackend::Qsv).is_empty());
+        assert!(hwaccel_args(&palmtop_config::EncodeBackend::Amf).is_empty());
         assert!(hwaccel_args(&palmtop_config::EncodeBackend::Software).is_empty());
     }
 
@@ -557,6 +575,16 @@ mod tests {
         );
         assert_eq!(
             filter_and_scale(&palmtop_config::EncodeBackend::Nvenc, true, 1280, 720),
+            "format=nv12,scale=1280:720"
+        );
+        // QSV and AMF share NVENC's nv12 path -- same filter chain shape,
+        // just a different encoder consuming it downstream.
+        assert_eq!(
+            filter_and_scale(&palmtop_config::EncodeBackend::Qsv, true, 1280, 720),
+            "format=nv12,scale=1280:720"
+        );
+        assert_eq!(
+            filter_and_scale(&palmtop_config::EncodeBackend::Amf, true, 1280, 720),
             "format=nv12,scale=1280:720"
         );
         // libx264's native pixel format is yuv420p, not nv12 -- getting this
@@ -581,16 +609,21 @@ mod tests {
     fn each_backend_spells_vbr_its_own_way_but_shares_the_same_bitrate_numbers() {
         let vaapi_args = rate_control_args(&vaapi(), 2000, 4000, 400);
         let nvenc_args = rate_control_args(&palmtop_config::EncodeBackend::Nvenc, 2000, 4000, 400);
+        let qsv_args = rate_control_args(&palmtop_config::EncodeBackend::Qsv, 2000, 4000, 400);
+        let amf_args = rate_control_args(&palmtop_config::EncodeBackend::Amf, 2000, 4000, 400);
         let sw_args = rate_control_args(&palmtop_config::EncodeBackend::Software, 2000, 4000, 400);
 
         assert_eq!(vaapi_args[0], "-rc_mode");
         assert_eq!(nvenc_args[0], "-rc");
+        assert_eq!(amf_args[0], "-rc"); // same flag name as NVENC, different value
+        assert_ne!(amf_args[1], nvenc_args[1], "AMF and NVENC must not share NVENC's \"vbr\" value verbatim");
+        assert_eq!(qsv_args[0], "-b:v"); // no rc-mode flag at all -- starts straight at the shared bitrate args
         assert_eq!(sw_args[0], "-preset"); // libx264 has no rc-mode flag at all
 
         // Whatever the flags leading up to it, the actual numbers must agree
         // across backends -- the whole point of sharing preset/maxrate math
-        // in one place rather than three.
-        for args in [&vaapi_args, &nvenc_args, &sw_args] {
+        // in one place rather than five.
+        for args in [&vaapi_args, &nvenc_args, &qsv_args, &amf_args, &sw_args] {
             assert!(args.contains(&"-b:v".to_string()) && args.contains(&"2000k".to_string()));
             assert!(args.contains(&"-maxrate".to_string()) && args.contains(&"4000k".to_string()));
             assert!(args.contains(&"-bufsize".to_string()) && args.contains(&"400k".to_string()));

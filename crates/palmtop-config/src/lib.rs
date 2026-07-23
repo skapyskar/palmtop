@@ -253,40 +253,101 @@ impl HostConfig {
                 "[gpu] configured codec {configured} does not work on this machine (is ffmpeg \
                  built with libx264?) -- falling back to auto-detection."
             );
-        }
-        // Anything else, including the unconfigured default (h264_vaapi), is
-        // "figure it out": try VA-API first since it is the cheapest on
-        // power and CPU when it works, matching resolved_render_node's own
-        // priority.
-        if let Some(node) = working_vaapi_node(&self.gpu.vaapi_render_node, "h264_vaapi") {
-            return Ok(EncodeBackend::Vaapi { render_node: node });
-        }
-        if nvenc_encodes() {
-            eprintln!("[gpu] no VA-API render node can encode -- using NVENC instead.");
-            return Ok(EncodeBackend::Nvenc);
-        }
-        if software_encodes() {
+        } else if configured == EncodeBackend::Qsv.codec_name() {
+            if qsv_encodes() {
+                return Ok(EncodeBackend::Qsv);
+            }
             eprintln!(
-                "[gpu] no hardware encoder (VA-API or NVENC) is available -- falling back to \
-                 software encoding. This costs real CPU and may not sustain the target \
-                 framerate at high resolutions; run `palmtopd --doctor` for the full picture."
+                "[gpu] configured codec {configured} does not work on this machine -- \
+                 falling back to auto-detection."
             );
-            return Ok(EncodeBackend::Software);
+        } else if configured == EncodeBackend::Amf.codec_name() {
+            if amf_encodes() {
+                return Ok(EncodeBackend::Amf);
+            }
+            eprintln!(
+                "[gpu] configured codec {configured} does not work on this machine -- \
+                 falling back to auto-detection."
+            );
         }
-        bail!(
-            "no working video encoder found on this machine -- tried VA-API, NVENC, and \
-             software (libx264) encoding. Run `palmtopd --doctor` for the full diagnosis."
-        );
+
+        // Anything else, including the unconfigured default (h264_vaapi), is
+        // "figure it out". The order tried is platform-specific because the
+        // *cheapest-when-it-works* backend differs: VA-API on Linux, Quick
+        // Sync/NVENC/AMF on Windows (all GPU vendors get a real hardware
+        // path there, checked in an arbitrary but stable order since there's
+        // no single "cheapest" answer across Intel/NVIDIA/AMD).
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(node) = working_vaapi_node(&self.gpu.vaapi_render_node, "h264_vaapi") {
+                return Ok(EncodeBackend::Vaapi { render_node: node });
+            }
+            if nvenc_encodes() {
+                eprintln!("[gpu] no VA-API render node can encode -- using NVENC instead.");
+                return Ok(EncodeBackend::Nvenc);
+            }
+            if software_encodes() {
+                eprintln!(
+                    "[gpu] no hardware encoder (VA-API or NVENC) is available -- falling back \
+                     to software encoding. This costs real CPU and may not sustain the target \
+                     framerate at high resolutions; run `palmtopd --doctor` for the full \
+                     picture."
+                );
+                return Ok(EncodeBackend::Software);
+            }
+            bail!(
+                "no working video encoder found on this machine -- tried VA-API, NVENC, and \
+                 software (libx264) encoding. Run `palmtopd --doctor` for the full diagnosis."
+            );
+        }
+        #[cfg(windows)]
+        {
+            if qsv_encodes() {
+                eprintln!("[gpu] using Intel Quick Sync (QSV).");
+                return Ok(EncodeBackend::Qsv);
+            }
+            if nvenc_encodes() {
+                eprintln!("[gpu] no Quick Sync device found -- using NVENC instead.");
+                return Ok(EncodeBackend::Nvenc);
+            }
+            if amf_encodes() {
+                eprintln!("[gpu] no Quick Sync or NVENC device found -- using AMD AMF instead.");
+                return Ok(EncodeBackend::Amf);
+            }
+            if software_encodes() {
+                eprintln!(
+                    "[gpu] no hardware encoder (QSV, NVENC, or AMF) is available -- falling \
+                     back to software encoding. This costs real CPU and may not sustain the \
+                     target framerate at high resolutions; run `palmtopd --doctor` for the \
+                     full picture."
+                );
+                return Ok(EncodeBackend::Software);
+            }
+            bail!(
+                "no working video encoder found on this machine -- tried Quick Sync, NVENC, \
+                 AMF, and software (libx264) encoding. Run `palmtopd --doctor` for the full \
+                 diagnosis."
+            );
+        }
     }
 }
 
 /// Which real encoder this machine will run through, and what `encode::spawn`
 /// needs to know to build the right ffmpeg invocation for it. See
 /// `HostConfig::resolved_encode_backend`.
+///
+/// `Vaapi` is Linux-only (it names a `/dev/dri` render node); `Qsv` and `Amf`
+/// are Windows-only (Intel Quick Sync and AMD AMF respectively -- ffmpeg
+/// exposes both as ordinary encoders, not through a hwaccel device handle,
+/// the same shape as `Nvenc`). `Nvenc` and `Software` are the two backends
+/// that exist on both platforms unchanged, since NVENC and libx264 are the
+/// same ffmpeg encoders either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeBackend {
     Vaapi { render_node: String },
     Nvenc,
+    Qsv,
+    Amf,
     Software,
 }
 
@@ -295,6 +356,8 @@ impl EncodeBackend {
         match self {
             EncodeBackend::Vaapi { .. } => "h264_vaapi",
             EncodeBackend::Nvenc => "h264_nvenc",
+            EncodeBackend::Qsv => "h264_qsv",
+            EncodeBackend::Amf => "h264_amf",
             EncodeBackend::Software => "libx264",
         }
     }
@@ -305,6 +368,8 @@ impl std::fmt::Display for EncodeBackend {
         match self {
             EncodeBackend::Vaapi { render_node } => write!(f, "VA-API on {render_node}"),
             EncodeBackend::Nvenc => write!(f, "NVENC"),
+            EncodeBackend::Qsv => write!(f, "Intel Quick Sync (QSV)"),
+            EncodeBackend::Amf => write!(f, "AMD AMF"),
             EncodeBackend::Software => write!(f, "software (libx264)"),
         }
     }
@@ -372,19 +437,65 @@ pub fn software_encodes() -> bool {
         .unwrap_or(false)
 }
 
-/// Every DRM render node on this machine, sorted for a stable preference order.
+/// Intel Quick Sync, checked the same "prove it by doing it" way as NVENC.
+/// Windows-only in practice (ffmpeg's `h264_qsv` needs the Intel Media SDK
+/// runtime, which ships with Intel's Windows graphics driver); harmless to
+/// leave callable on Linux too since it will just fail the probe there.
+pub fn qsv_encodes() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
+            "-c:v", "h264_qsv",
+            "-f", "null", "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// AMD AMF, checked the same "prove it by doing it" way as NVENC/QSV.
+pub fn amf_encodes() -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
+            "-c:v", "h264_amf",
+            "-f", "null", "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Every DRM render node on this machine, sorted for a stable preference
+/// order. Linux-only -- `/dev/dri` doesn't exist elsewhere -- so this always
+/// returns empty on Windows rather than erroring; callers (`working_vaapi_node`,
+/// `--doctor`'s VA-API check) already treat "no nodes" as a normal, expected
+/// outcome, not a failure.
 pub fn render_nodes() -> Vec<String> {
-    let mut nodes = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("renderD") {
-                nodes.push(format!("/dev/dri/{name}"));
+    #[cfg(target_os = "linux")]
+    {
+        let mut nodes = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("renderD") {
+                    nodes.push(format!("/dev/dri/{name}"));
+                }
             }
         }
+        nodes.sort();
+        nodes
     }
-    nodes.sort();
-    nodes
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
 }
 
 /// Whether `node` can really hardware-encode `codec`, established by encoding
@@ -551,10 +662,10 @@ fn no_device_help(dir: &Path) -> String {
 // ---------------------------------------------------------------- helpers
 
 /// Locates `config/` by walking up from the CWD (developer checkout
-/// workflow), falling back to the user's XDG config dir for a release
-/// install, which has no `config/host.example.toml` anywhere to find --
-/// `scripts/install.sh` seeds `host.toml` directly into that XDG directory
-/// for exactly this case.
+/// workflow), falling back to the platform's standard per-user config
+/// location for a release install, which has no `config/host.example.toml`
+/// anywhere to find -- `scripts/install.sh`/`install.ps1` seed `host.toml`
+/// directly into that directory for exactly this case.
 pub fn config_dir() -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var("PALMTOP_CONFIG_DIR") {
         return Ok(PathBuf::from(explicit));
@@ -569,14 +680,26 @@ pub fn config_dir() -> Result<PathBuf> {
             break;
         }
     }
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .context(
-            "could not locate the config/ directory, and neither XDG_CONFIG_HOME nor HOME \
-             is set to fall back to -- set PALMTOP_CONFIG_DIR explicitly",
+
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA").map(PathBuf::from).context(
+            "could not locate the config directory -- %APPDATA% is not set; set \
+             PALMTOP_CONFIG_DIR explicitly",
         )?;
-    Ok(base.join("palmtop"))
+        return Ok(base.join("palmtop"));
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .context(
+                "could not locate the config/ directory, and neither XDG_CONFIG_HOME nor HOME \
+                 is set to fall back to -- set PALMTOP_CONFIG_DIR explicitly",
+            )?;
+        Ok(base.join("palmtop"))
+    }
 }
 
 /// Primary outbound IPv4 address, found by asking the routing table which
@@ -592,9 +715,10 @@ pub fn detect_primary_ip() -> Result<String> {
     Ok(sock.local_addr()?.ip().to_string())
 }
 
-/// 16 random bytes, hex-encoded, read straight from the kernel CSPRNG.
-/// Avoids pulling in a `rand` dependency for something the OS already
-/// provides directly and portably (Linux-only host, per the plan's scope).
+/// 16 random bytes, hex-encoded, read straight from the OS CSPRNG. Avoids
+/// pulling in a `rand` dependency for something the OS already provides
+/// directly on both platforms Palmtop hosts on.
+#[cfg(not(windows))]
 fn generate_token() -> Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
@@ -605,10 +729,53 @@ fn generate_token() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Same contract as the Linux version above, via `BCryptGenRandom` -- the
+/// Windows CNG API's own CSPRNG, not a userspace fallback. Not yet exercised
+/// by this machine (no Windows target/compiler available here); correctness
+/// verified against the `windows` crate's published signature
+/// (`Option<BCRYPT_ALG_HANDLE>, &mut [u8], BCRYPTGENRANDOM_FLAGS -> NTSTATUS`)
+/// rather than a local compile -- confirm on CI/a real Windows machine before
+/// trusting this for anything beyond the pairing token it currently guards.
+#[cfg(windows)]
+fn generate_token() -> Result<String> {
+    use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    let mut bytes = [0u8; 16];
+    unsafe {
+        BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+            .ok()
+            .context("BCryptGenRandom")?;
+    }
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn every_backend_has_a_distinct_ffmpeg_codec_name() {
+        let names = [
+            EncodeBackend::Vaapi { render_node: "/dev/dri/renderD128".to_string() }.codec_name(),
+            EncodeBackend::Nvenc.codec_name(),
+            EncodeBackend::Qsv.codec_name(),
+            EncodeBackend::Amf.codec_name(),
+            EncodeBackend::Software.codec_name(),
+        ];
+        let mut unique = names.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "two backends share a codec_name: {names:?}");
+    }
+
+    #[test]
+    fn qsv_and_amf_display_as_the_vendor_name_not_the_ffmpeg_codec() {
+        // A raw "h264_qsv"/"h264_amf" in an error message means nothing to
+        // someone who doesn't already know ffmpeg's encoder names -- the
+        // whole point of Display existing separately from codec_name.
+        assert_eq!(EncodeBackend::Qsv.to_string(), "Intel Quick Sync (QSV)");
+        assert_eq!(EncodeBackend::Amf.to_string(), "AMD AMF");
+    }
 
     // HostConfig::load() resolves its directory through the PALMTOP_CONFIG_DIR
     // env var, which is process-wide -- serialize the tests that set it so
