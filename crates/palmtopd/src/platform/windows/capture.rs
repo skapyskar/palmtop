@@ -158,6 +158,22 @@ pub fn run(handle: ScreencastHandle, slot: Arc<FrameSlot>, stop: Arc<AtomicBool>
                 if let Err(e) = publish_frame(&frame, &handler_device, &handler_context, &handler_slot) {
                     eprintln!("[capture] dropped a frame: {e:#}");
                 }
+                // Confirmed the hard way (a real capture that showed the
+                // first frame and then froze forever): a
+                // Direct3D11CaptureFrame is checked out of the pool by
+                // TryGetNextFrame and stays checked out -- consuming one of
+                // the pool's buffers -- until explicitly closed. It is not
+                // returned by the frame simply going out of scope; WinRT's
+                // buffer-return signalling happens specifically on Close(),
+                // not on COM ref-count reaching zero. With a one-buffer pool
+                // (deliberate -- see CreateFreeThreaded below), never closing
+                // this frame means the pool permanently has zero free
+                // buffers after the very first frame, and capture stalls for
+                // the rest of the session. Called even if publish_frame
+                // failed above, for the same reason a `finally` block would
+                // be here in any other language: the buffer must go back
+                // regardless of what happened to this frame's contents.
+                let _ = frame.Close();
             }
             Ok(())
         },

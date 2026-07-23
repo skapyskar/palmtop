@@ -57,7 +57,15 @@ pub fn run(rx: Receiver<Message>) -> Result<()> {
             Message::PointerMotionAbsolute { x, y } => {
                 let xi = (x.clamp(0.0, 1.0) * ABSOLUTE_EXTENT) as i32;
                 let yi = (y.clamp(0.0, 1.0) * ABSOLUTE_EXTENT) as i32;
-                send_mouse(xi, yi, 0, MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0);
+                // MOUSEEVENTF_ABSOLUTE only changes how dx/dy are
+                // *interpreted* for a move -- it is not itself a move event.
+                // Without MOUSEEVENTF_MOVE alongside it, Win32 does nothing
+                // at all: no cursor movement, and because direct-touch mode
+                // taps the video by moving here and then clicking, no click
+                // effect either, since the click lands wherever the cursor
+                // already was. This is exactly why tapping the phone screen
+                // did nothing on a real Windows machine.
+                send_mouse(xi, yi, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0);
             }
             Message::PointerButton { button, pressed } => {
                 let flags = match (button, pressed) {
