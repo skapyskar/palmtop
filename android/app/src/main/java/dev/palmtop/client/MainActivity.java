@@ -1,5 +1,6 @@
 package dev.palmtop.client;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.media.MediaCodec;
@@ -113,6 +114,19 @@ public class MainActivity extends Activity {
     private FrameLayout rootLayout;
     private Button logButton;
     private View logOverlayView;
+    private View settingsOverlayView;
+    private Button settingsButton;
+    /** Empty container in the left column that {@link #wireJoystick()}
+     *  fills. Kept as a field so the column's construction stays one
+     *  readable method rather than growing a second responsibility. */
+    private LinearLayout joystickSlot;
+    /** Last status line and its colour. The status view lives in the
+     *  settings sheet now, which is detached most of the time -- so the
+     *  text has to survive independently of the view that shows it, or
+     *  opening Settings would show a blank line until something next
+     *  happened to update it. */
+    private String statusText = "";
+    private int statusColor = Ui.TEXT_MUTED;
     private TextView statusView;
     private EditText hiddenInput;
     private Button kbToggle;
@@ -126,6 +140,13 @@ public class MainActivity extends Activity {
      *  -- see its class doc comment. Constructed once, alongside surfaceView,
      *  in {@link #buildVideoContainer()}. */
     private PinchZoomController pinchZoom;
+    /** Drives the cursor from the joystick -- see {@link #wireJoystick()}. */
+    private CursorDriver cursorDriver;
+    /** Pointer buttons this client currently believes are pressed on the
+     *  host, indexed by {@code Protocol.BUTTON_*}. Tracked so a connection
+     *  that drops mid-drag cannot leave the laptop with a stuck mouse button
+     *  -- the same class of bug as the plan's "modifier stuck" edge case. */
+    private final boolean[] buttonHeld = new boolean[3];
     /** Current stream format. Replaced when the host announces a new one
      *  after a mode change, so it cannot be a local: the UI lambdas below
      *  would need it effectively-final. */
@@ -308,77 +329,140 @@ public class MainActivity extends Activity {
         mainLayout.addView(buildVideoContainer(), new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
+        // After buildLeftBar(), which creates the slot this fills.
+        wireJoystick();
+
         buildHiddenInput(root);
         return root;
     }
 
-    /** Every control lives in this one column: connection status/reconnect,
-     * live stats, quality mode, aspect ratio, HUD toggle, keyboard toggle. */
+    /**
+     * The always-visible controls: settings, keyboard, and the cursor
+     * joystick.
+     *
+     * <p>Everything that is set once and then forgotten -- connection status,
+     * reconnect, devices, quality mode, aspect ratio, the log and the stats
+     * toggle -- moved behind {@link #showSettings()}. They were permanently
+     * occupying the column that the controls used *during* a session should
+     * own, which is what made room for the joystick without touching the
+     * video.
+     *
+     * <p>The column keeps its existing fixed width, so the video's width and
+     * shape are exactly what they were before this change. That was the hard
+     * constraint on this whole redesign.
+     */
     private LinearLayout buildLeftBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.VERTICAL);
         bar.setBackgroundColor(Ui.PANEL);
         bar.setPadding(Ui.md(this), Ui.md(this), Ui.md(this), Ui.md(this));
 
-        // Monospaced and muted at rest. This line is read as data -- an
-        // address, a resolution, a frame count -- and proportional type makes
-        // those numbers jitter sideways every time they update. Its colour is
-        // the app's one live signal, so it is the *only* thing here that is
-        // ever saturated: green connected, red failed (see handleStatus and
-        // runNetwork's catch).
-        statusView = Ui.mono(this);
-        bar.addView(statusView, Ui.stacked(this, 10));
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.setOrientation(LinearLayout.HORIZONTAL);
 
-        // Always-available escape hatch: retry the connection in place
-        // (network hiccup, host restarted, portal dialog dismissed by
-        // mistake, ...) without needing another adb-launched Intent.
-        reconnectButton = Ui.button(this, "⟳  Reconnect");
-        reconnectButton.setOnClickListener(v -> startConnection());
-        bar.addView(reconnectButton, Ui.stacked(this, 6));
-
-        devicesButton = Ui.button(this, "🖥  Devices");
-        devicesButton.setOnClickListener(v -> openDeviceList());
-        bar.addView(devicesButton, Ui.stacked(this, 6));
-
-        modeButton = Ui.button(this, "");
-        modeButton.setOnClickListener(v -> showModePicker());
-        bar.addView(modeButton, Ui.stacked(this, 6));
-        updateModeButton();
-
-        aspectButton = Ui.button(this, "");
-        aspectButton.setOnClickListener(v -> showAspectPicker());
-        bar.addView(aspectButton, Ui.stacked(this, 10));
-        updateAspectButton();
-
-        // The three icon-only controls share one row rather than each taking a
-        // full-width slab. Three near-empty full-width buttons is most of what
-        // made this column read as unfinished, and it spent vertical space the
-        // column does not have on a landscape phone.
-        LinearLayout iconRow = new LinearLayout(this);
-        iconRow.setOrientation(LinearLayout.HORIZONTAL);
-
-        logButton = Ui.iconButton(this, "📋");
-        logButton.setOnClickListener(v -> showSessionLog());
-        iconRow.addView(logButton, iconSlot(0));
-
-        hudToggle = Ui.iconButton(this, "📊");
-        hudToggle.setOnClickListener(v -> hud.setShown(!hud.isHudShown()));
-        iconRow.addView(hudToggle, iconSlot(Ui.dp(this, 6)));
+        settingsButton = Ui.iconButton(this, "⚙");
+        settingsButton.setOnClickListener(v -> showSettings());
+        topRow.addView(settingsButton, iconSlot(0));
 
         kbToggle = Ui.iconButton(this, "⌨");
         kbToggle.setOnClickListener(v -> showKeyboard());
-        iconRow.addView(kbToggle, iconSlot(Ui.dp(this, 6)));
+        topRow.addView(kbToggle, iconSlot(Ui.dp(this, 6)));
 
-        bar.addView(iconRow, Ui.stacked(this, 10));
+        bar.addView(topRow, Ui.stacked(this, 10));
+
+        // Filled by wireJoystick(). Empty here so this method stays "build
+        // the column" rather than also "construct and wire an input device".
+        joystickSlot = new LinearLayout(this);
+        joystickSlot.setOrientation(LinearLayout.VERTICAL);
+        bar.addView(joystickSlot, Ui.stacked(this, 10));
 
         // Below the controls, not above them: the HUD is diagnostic, appears
         // only when toggled on, and would otherwise shove every button down
-        // the column the moment it did.
+        // the column the moment it did. It stays in the column rather than
+        // moving into the settings sheet because it is meant to be read
+        // *while* using the session -- only its toggle moved.
         hud = new HudView(this);
         bar.addView(hud, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         return bar;
+    }
+
+    /**
+     * Builds the joystick and its click buttons into the slot the column left
+     * for them.
+     *
+     * <p>Separate from {@link #buildLeftBar()} because it is doing something
+     * different in kind: that method arranges views, this one assembles an
+     * input device out of three parts and connects it to the wire.
+     *
+     * <p>Nothing here needed a protocol change. {@code PointerMotionRelative}
+     * and {@code PointerButton} have both been implemented on the host since
+     * before this feature existed, so the joystick cannot desync the two ends
+     * and this ships as an APK-only change.
+     */
+    private void wireJoystick() {
+        cursorDriver = new CursorDriver((dx, dy) ->
+                enqueue(Protocol.pointerMotionRelative(dx, dy)));
+
+        JoystickView stick = new JoystickView(this);
+        stick.setListener(cursorDriver::setVector);
+        int size = Ui.dp(this, 128);
+        LinearLayout.LayoutParams stickLp = new LinearLayout.LayoutParams(size, size);
+        stickLp.gravity = Gravity.CENTER_HORIZONTAL;
+        stickLp.bottomMargin = Ui.sm(this);
+        joystickSlot.addView(stick, stickLp);
+
+        LinearLayout clicks = new LinearLayout(this);
+        clicks.setOrientation(LinearLayout.HORIZONTAL);
+
+        Button left = Ui.iconButton(this, "L");
+        wireClickButton(left, Protocol.BUTTON_LEFT);
+        clicks.addView(left, iconSlot(0));
+
+        Button right = Ui.iconButton(this, "R");
+        wireClickButton(right, Protocol.BUTTON_RIGHT);
+        clicks.addView(right, iconSlot(Ui.dp(this, 6)));
+
+        joystickSlot.addView(clicks, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    /**
+     * Sends press and release as the finger goes down and up, rather than
+     * synthesising a click on tap.
+     *
+     * <p>That distinction is the whole reason dragging works: holding L while
+     * working the joystick produces a real press-move-release on the host, so
+     * you can resize a window edge or select text -- something absolute
+     * tap-to-click cannot express at all.
+     */
+    @SuppressLint("ClickableViewAccessibility") // press/release is the point; a click callback cannot express it
+    private void wireClickButton(Button button, int protoButton) {
+        button.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    v.setPressed(true);
+                    sendButton(protoButton, true);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    v.setPressed(false);
+                    sendButton(protoButton, false);
+                    return true;
+                default:
+                    return false;
+            }
+        });
+    }
+
+    /** Sends a pointer button and remembers it, so {@link #teardown()} can
+     *  release anything still held if the session ends mid-press. */
+    private void sendButton(int protoButton, boolean pressed) {
+        if (protoButton >= 0 && protoButton < buttonHeld.length) {
+            buttonHeld[protoButton] = pressed;
+        }
+        enqueue(Protocol.pointerButton(protoButton, pressed));
     }
 
     /** Equal-width slot in the icon row. Weighted with a zero base width so
@@ -554,12 +638,12 @@ public class MainActivity extends Activity {
      * unambiguous regardless of the overlay's exact measured bounds. */
     private void setControlsVisible(boolean visible) {
         int v = visible ? View.VISIBLE : View.GONE;
+        // Only the always-visible column controls need toggling now. The rest
+        // live in the settings sheet, which is a separate overlay that is
+        // simply not open while the device list covers the screen.
+        settingsButton.setVisibility(v);
         kbToggle.setVisibility(v);
-        reconnectButton.setVisibility(v);
-        modeButton.setVisibility(v);
-        aspectButton.setVisibility(v);
-        hudToggle.setVisibility(v);
-        devicesButton.setVisibility(v);
+        joystickSlot.setVisibility(v);
     }
 
     /** Wires touch input and surface lifecycle -- shared by the direct-connect
@@ -793,6 +877,115 @@ public class MainActivity extends Activity {
         if (logOverlayView != null) {
             rootLayout.removeView(logOverlayView);
             logOverlayView = null;
+        }
+    }
+
+    /**
+     * Everything that is configured rather than operated.
+     *
+     * <p>Built fresh on each open rather than kept around: these controls are
+     * touched rarely, so holding an inflated sheet for the whole session to
+     * save a few milliseconds on an occasional tap is the wrong trade. It also
+     * means the sheet always reflects current state by construction, with no
+     * separate refresh path to keep in sync.
+     */
+    private void showSettings() {
+        if (settingsOverlayView != null) {
+            dismissSettings();
+            return;
+        }
+        LinearLayout overlay = Ui.sheet(this);
+
+        overlay.addView(Ui.title(this, "Settings"), Ui.stacked(this, 12));
+        overlay.addView(Ui.hairline(this), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 1)));
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setPadding(0, Ui.md(this), 0, Ui.md(this));
+        scroll.setClipToPadding(false);
+        scroll.addView(content);
+        overlay.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // The connection line. Recreated here and immediately re-populated
+        // from the retained statusText/statusColor -- the view is detached
+        // whenever this sheet is closed, so the *text* has to outlive it.
+        statusView = Ui.mono(this);
+        statusView.setTextColor(statusColor);
+        statusView.setText(statusText);
+        content.addView(statusView, Ui.stacked(this, 12));
+
+        reconnectButton = Ui.button(this, "⟳  Reconnect");
+        reconnectButton.setOnClickListener(v -> {
+            dismissSettings();
+            startConnection();
+        });
+        content.addView(reconnectButton, Ui.stacked(this, 6));
+
+        devicesButton = Ui.button(this, "🖥  Devices");
+        devicesButton.setOnClickListener(v -> {
+            dismissSettings();
+            openDeviceList();
+        });
+        content.addView(devicesButton, Ui.stacked(this, 6));
+
+        modeButton = Ui.button(this, "");
+        modeButton.setOnClickListener(v -> showModePicker());
+        content.addView(modeButton, Ui.stacked(this, 6));
+        updateModeButton();
+
+        aspectButton = Ui.button(this, "");
+        aspectButton.setOnClickListener(v -> showAspectPicker());
+        content.addView(aspectButton, Ui.stacked(this, 6));
+        updateAspectButton();
+
+        logButton = Ui.button(this, "📋  Session log");
+        logButton.setOnClickListener(v -> {
+            dismissSettings();
+            showSessionLog();
+        });
+        content.addView(logButton, Ui.stacked(this, 6));
+
+        hudToggle = Ui.button(this, hud.isHudShown() ? "📊  Hide stats" : "📊  Show stats");
+        hudToggle.setOnClickListener(v -> {
+            hud.setShown(!hud.isHudShown());
+            hudToggle.setText(hud.isHudShown() ? "📊  Hide stats" : "📊  Show stats");
+        });
+        content.addView(hudToggle, Ui.stacked(this, 0));
+
+        Button close = Ui.primaryButton(this, "Close");
+        close.setOnClickListener(v -> dismissSettings());
+        overlay.addView(close);
+
+        settingsOverlayView = overlay;
+        rootLayout.addView(overlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    private void dismissSettings() {
+        if (settingsOverlayView != null) {
+            rootLayout.removeView(settingsOverlayView);
+            settingsOverlayView = null;
+        }
+    }
+
+    /**
+     * Records the connection line and shows it if the settings sheet happens
+     * to be open.
+     *
+     * <p>Single funnel for every status update, because {@link #statusView}
+     * now lives in a sheet that is detached most of the time. Writing to the
+     * view directly would either NPE or silently update a view nobody can
+     * see, and the next open would show a stale or blank line.
+     */
+    private void setStatus(int color, String text) {
+        statusColor = color;
+        statusText = text;
+        if (statusView != null && settingsOverlayView != null) {
+            statusView.setTextColor(color);
+            statusView.setText(text);
         }
     }
 
@@ -1118,8 +1311,7 @@ public class MainActivity extends Activity {
         SessionLog.startSession();
         SessionLog.info("app", "Palmtop " + appVersion() + ", protocol v" + Protocol.VERSION);
         SessionLog.info("net", "connecting to " + host + ":" + port);
-        statusView.setTextColor(Ui.ACCENT);
-        statusView.setText("connecting to " + host + ":" + port + " ...");
+        setStatus(Ui.ACCENT, "connecting to " + host + ":" + port + " ...");
         new Thread(() -> runNetwork(surfaceHolder, myGeneration), "palmtop-net").start();
     }
 
@@ -1134,6 +1326,17 @@ public class MainActivity extends Activity {
     }
 
     private void teardown() {
+        // Release anything still held before the socket goes. A connection
+        // dropped mid-drag would otherwise leave the laptop with a stuck
+        // mouse button and no way to clear it from this end.
+        for (int b = 0; b < buttonHeld.length; b++) {
+            if (buttonHeld[b]) {
+                buttonHeld[b] = false;
+                if (connected) enqueue(Protocol.pointerButton(b, false));
+            }
+        }
+        if (cursorDriver != null) cursorDriver.stop();
+
         connected = false;
         decodedFrames = 0;
         droppedFrames = 0;
@@ -1433,8 +1636,7 @@ public class MainActivity extends Activity {
             }
             if (generation == myGeneration) {
                 runOnUiThread(() -> {
-                    statusView.setTextColor(Ui.ERR);
-                    statusView.setText("ERROR: " + e + "\n\ntap ⟳ Reconnect to retry");
+                    setStatus(Ui.ERR, "ERROR: " + e + "\n\ntap ⚙ → Reconnect to retry");
                 });
             }
         } finally {
@@ -1518,8 +1720,8 @@ public class MainActivity extends Activity {
         final String detail = msg.detail;
         runOnUiThread(() -> {
             if (statusView == null) return;
-            statusView.setTextColor(failed ? Ui.ERR : Ui.TEXT_MUTED);
-            statusView.setText(failed ? ("ERROR: " + detail) : detail);
+            setStatus(failed ? Ui.ERR : Ui.TEXT_MUTED,
+                    failed ? ("ERROR: " + detail) : detail);
         });
     }
 
@@ -1542,8 +1744,7 @@ public class MainActivity extends Activity {
         if (generation == myGeneration) {
             runOnUiThread(() -> {
                 // The one moment worth colouring: the stream is actually live.
-                statusView.setTextColor(Ui.OK);
-                statusView.setText("● connected  " + host + ":" + port + "\n"
+                setStatus(Ui.OK, "● connected  " + host + ":" + port + "\n"
                         + cfg.width + "x" + cfg.height + "@" + cfg.fps + "fps");
                 resizeSurfaceToFit(cfg.width, cfg.height);
             });
@@ -1620,8 +1821,7 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             // Steady state drops back to muted: once the picture is up, the
             // status line is reference information, not an alert.
-            statusView.setTextColor(Ui.TEXT_MUTED);
-            statusView.setText(host + ":" + port + "\n"
+            setStatus(Ui.TEXT_MUTED, host + ":" + port + "\n"
                     + vc.width + "x" + vc.height + "@" + vc.fps + "fps\n"
                     + "decoded " + d + "   stale " + sk);
             hud.update(stats, Modes.nameOf(currentMode), vc.width, vc.height, vc.fps);
