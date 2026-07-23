@@ -16,6 +16,11 @@ public class CursorDriverTest {
 
     private static final float EPS = 0.5f;
 
+    /** Speed these cases are measured at. A fixed number rather than the
+     *  default, so retuning the default cannot quietly change what the
+     *  maths tests are asserting. */
+    private static final float SPEED = 1000f;
+
     /** Magnitude of a delta pair. */
     private static float mag(float[] d) {
         return (float) Math.hypot(d[0], d[1]);
@@ -23,7 +28,7 @@ public class CursorDriverTest {
 
     @Test
     public void restProducesNoMotion() {
-        float[] d = CursorDriver.deltaFor(0f, 0f, 16L);
+        float[] d = CursorDriver.deltaFor(0f, 0f, 16L, SPEED);
         assertEquals(0f, d[0], 0f);
         assertEquals(0f, d[1], 0f);
     }
@@ -31,7 +36,7 @@ public class CursorDriverTest {
     @Test
     public void insideDeadzoneProducesNoMotion() {
         // A thumb resting on the pad must not drift the cursor.
-        float[] d = CursorDriver.deltaFor(0.10f, 0f, 16L);
+        float[] d = CursorDriver.deltaFor(0.10f, 0f, 16L, SPEED);
         assertEquals(0f, d[0], 0f);
         assertEquals(0f, d[1], 0f);
     }
@@ -45,14 +50,14 @@ public class CursorDriverTest {
      */
     private static final long FULL_TICK = CursorDriver.MAX_TICK_MS;
 
-    /** Distance covered at {@code fraction} of max speed over FULL_TICK. */
+    /** Distance covered at {@code fraction} of {@link #SPEED} over FULL_TICK. */
     private static float expectedOverFullTick(float fraction) {
-        return fraction * CursorDriver.MAX_SPEED_PX_S * (FULL_TICK / 1000f);
+        return fraction * SPEED * (FULL_TICK / 1000f);
     }
 
     @Test
     public void fullDeflectionTravelsAtMaxSpeed() {
-        float[] d = CursorDriver.deltaFor(1f, 0f, FULL_TICK);
+        float[] d = CursorDriver.deltaFor(1f, 0f, FULL_TICK, SPEED);
         assertEquals(expectedOverFullTick(1f), d[0], EPS);
         assertEquals(0f, d[1], EPS);
     }
@@ -62,7 +67,7 @@ public class CursorDriverTest {
         // Just outside the deadzone must be near-zero, not a jump to some
         // fraction of full speed -- otherwise the cursor lurches the instant
         // the thumb crosses the threshold.
-        float[] d = CursorDriver.deltaFor(CursorDriver.DEADZONE + 0.001f, 0f, FULL_TICK);
+        float[] d = CursorDriver.deltaFor(CursorDriver.DEADZONE + 0.001f, 0f, FULL_TICK, SPEED);
         assertTrue("expected near-zero, got " + d[0], Math.abs(d[0]) < 1f);
     }
 
@@ -71,14 +76,14 @@ public class CursorDriverTest {
         // raw 0.5 -> rescaled m = (0.5-0.12)/(1-0.12) = 0.4318
         // m^2 = 0.1865 -> markedly less than half speed, which is the point:
         // fine control near centre, full speed still reachable at the rim.
-        float[] d = CursorDriver.deltaFor(0.5f, 0f, FULL_TICK);
+        float[] d = CursorDriver.deltaFor(0.5f, 0f, FULL_TICK, SPEED);
         assertEquals(expectedOverFullTick(0.1865f), d[0], EPS);
     }
 
     @Test
     public void deltaScalesWithElapsedTime() {
-        float[] one = CursorDriver.deltaFor(1f, 0f, 16L);
-        float[] two = CursorDriver.deltaFor(1f, 0f, 32L);
+        float[] one = CursorDriver.deltaFor(1f, 0f, 16L, SPEED);
+        float[] two = CursorDriver.deltaFor(1f, 0f, 32L, SPEED);
         assertEquals(one[0] * 2f, two[0], EPS);
     }
 
@@ -86,13 +91,13 @@ public class CursorDriverTest {
     public void diagonalIsNotFasterThanCardinal() {
         // The classic joystick bug: unclamped diagonals travel sqrt(2) times
         // faster than a cardinal push at the same deflection.
-        float[] diagonal = CursorDriver.deltaFor(1f, 1f, FULL_TICK);
+        float[] diagonal = CursorDriver.deltaFor(1f, 1f, FULL_TICK, SPEED);
         assertEquals(expectedOverFullTick(1f), mag(diagonal), EPS);
     }
 
     @Test
     public void directionIsPreserved() {
-        float[] d = CursorDriver.deltaFor(-0.8f, 0.6f, FULL_TICK);
+        float[] d = CursorDriver.deltaFor(-0.8f, 0.6f, FULL_TICK, SPEED);
         assertTrue("x should be negative, got " + d[0], d[0] < 0f);
         assertTrue("y should be positive, got " + d[1], d[1] > 0f);
         // 3-4-5 triangle: the -0.8/0.6 ratio must survive the curve.
@@ -101,8 +106,42 @@ public class CursorDriverTest {
 
     @Test
     public void elapsedTimeIsClampedSoAStallCannotTeleportTheCursor() {
-        float[] stalled = CursorDriver.deltaFor(1f, 0f, 5000L);
-        float[] clamped = CursorDriver.deltaFor(1f, 0f, CursorDriver.MAX_TICK_MS);
+        float[] stalled = CursorDriver.deltaFor(1f, 0f, 5000L, SPEED);
+        float[] clamped = CursorDriver.deltaFor(1f, 0f, CursorDriver.MAX_TICK_MS, SPEED);
         assertEquals(clamped[0], stalled[0], EPS);
+    }
+
+    // ---------------------------------------------------------- sensitivity
+
+    @Test
+    public void sensitivityScalesTravelProportionally() {
+        // The whole point of the slider: half the setting, half the distance.
+        float[] slow = CursorDriver.deltaFor(1f, 0f, FULL_TICK, 500f);
+        float[] fast = CursorDriver.deltaFor(1f, 0f, FULL_TICK, 1000f);
+        assertEquals(slow[0] * 2f, fast[0], EPS);
+    }
+
+    @Test
+    public void speedClampsToTheSupportedRange() {
+        assertEquals(CursorDriver.MIN_SPEED_PX_S, CursorDriver.clampSpeed(0f), EPS);
+        assertEquals(CursorDriver.MIN_SPEED_PX_S, CursorDriver.clampSpeed(-500f), EPS);
+        assertEquals(CursorDriver.MAX_SPEED_PX_S, CursorDriver.clampSpeed(99999f), EPS);
+        assertEquals(800f, CursorDriver.clampSpeed(800f), EPS);
+    }
+
+    @Test
+    public void defaultSpeedIsInsideTheSliderRange() {
+        // A default outside the range would render the slider unable to
+        // represent its own starting value.
+        assertTrue(CursorDriver.DEFAULT_SPEED_PX_S >= CursorDriver.MIN_SPEED_PX_S);
+        assertTrue(CursorDriver.DEFAULT_SPEED_PX_S <= CursorDriver.MAX_SPEED_PX_S);
+    }
+
+    @Test
+    public void defaultIsSlowerThanTheOriginalFixedSpeed() {
+        // The original 1200 was reasoned about, not felt, and reported too
+        // fast in real use. This pins the correction so it cannot regress.
+        assertTrue("default should be below the original 1200",
+                CursorDriver.DEFAULT_SPEED_PX_S < 1200f);
     }
 }

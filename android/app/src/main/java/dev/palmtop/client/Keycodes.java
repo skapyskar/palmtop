@@ -23,6 +23,14 @@ final class Keycodes {
     static final int KEY_ENTER = 28;
     static final int KEY_SPACE = 57;
 
+    // Modifier keys, for the latching modifier bar -- see ModifierLatch.
+    // These are pressed as real keys, not just signalled as a bitmask, which
+    // is what makes Super+drag and a bare Super tap (the overview) work.
+    static final int KEY_LEFTCTRL = 29;
+    static final int KEY_LEFTSHIFT = 42;
+    static final int KEY_LEFTALT = 56;
+    static final int KEY_LEFTMETA = 125;
+
     private static final Map<Character, int[]> MAP = new HashMap<>(); // {evdevCode, needsShift}
 
     static {

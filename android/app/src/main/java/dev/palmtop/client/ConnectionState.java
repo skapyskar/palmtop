@@ -125,6 +125,24 @@ final class ConnectionState {
         prefs(ctx).edit().putInt("aspectMode", mode).apply();
     }
 
+    /**
+     * Joystick speed at full deflection, in host pixels per second. Local
+     * like the aspect ratio -- it shapes what this phone sends, and the host
+     * neither knows nor needs to know about it.
+     *
+     * <p>Clamped on the way out as well as in, so a value written by an older
+     * or newer build with a different range can never drive the cursor at a
+     * speed this one considers unusable.
+     */
+    static float loadSensitivity(Context ctx) {
+        return CursorDriver.clampSpeed(
+                prefs(ctx).getFloat("sensitivity", CursorDriver.DEFAULT_SPEED_PX_S));
+    }
+
+    static void saveSensitivity(Context ctx, float pxPerSecond) {
+        prefs(ctx).edit().putFloat("sensitivity", CursorDriver.clampSpeed(pxPerSecond)).apply();
+    }
+
     private static SharedPreferences prefs(Context ctx) {
         return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }

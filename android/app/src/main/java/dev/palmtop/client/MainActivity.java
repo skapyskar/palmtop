@@ -29,6 +29,7 @@ import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 import java.io.ByteArrayInputStream;
@@ -147,6 +148,11 @@ public class MainActivity extends Activity {
      *  that drops mid-drag cannot leave the laptop with a stuck mouse button
      *  -- the same class of bug as the plan's "modifier stuck" edge case. */
     private final boolean[] buttonHeld = new boolean[3];
+    /** Latched Ctrl/Alt/Shift/Super -- see {@link ModifierLatch}. */
+    private final ModifierLatch modifiers = new ModifierLatch();
+    private final java.util.Map<Integer, Button> modifierButtons = new java.util.HashMap<>();
+    /** Joystick speed at full deflection, host px/s. Persisted. */
+    private float sensitivity = CursorDriver.DEFAULT_SPEED_PX_S;
     /** Current stream format. Replaced when the host announces a new one
      *  after a mode change, so it cannot be a local: the UI lambdas below
      *  would need it effectively-final. */
@@ -228,6 +234,7 @@ public class MainActivity extends Activity {
         // to talk to is a separate concern owned by DeviceStore.
         currentMode = ConnectionState.resolveMode(this, getIntent().getIntExtra("mode", -1));
         currentAspectMode = ConnectionState.loadAspectMode(this);
+        sensitivity = ConnectionState.loadSensitivity(this);
 
         // Three ways in, in priority order:
         //  1. credentials pushed by the laptop's USB pairing step (an Intent
@@ -404,6 +411,7 @@ public class MainActivity extends Activity {
     private void wireJoystick() {
         cursorDriver = new CursorDriver((dx, dy) ->
                 enqueue(Protocol.pointerMotionRelative(dx, dy)));
+        cursorDriver.setMaxSpeed(sensitivity);
 
         JoystickView stick = new JoystickView(this);
         stick.setListener(cursorDriver::setVector);
@@ -426,6 +434,87 @@ public class MainActivity extends Activity {
 
         joystickSlot.addView(clicks, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        buildModifierBar();
+    }
+
+    /**
+     * Ctrl / Alt / Shift / Super, as latching buttons.
+     *
+     * <p>Laid out two per row rather than four across: at this column width
+     * four buttons would each be barely a fingertip wide, and a modifier you
+     * mis-tap is worse than one that takes a moment to find -- it silently
+     * changes what every subsequent keystroke means.
+     *
+     * <p>See {@link ModifierLatch} for why these latch rather than being held,
+     * and why each sends a real key press rather than only a modifier bit.
+     */
+    private void buildModifierBar() {
+        LinearLayout row = null;
+        for (int i = 0; i < ModifierLatch.ALL.length; i++) {
+            if (i % 2 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                joystickSlot.addView(row, Ui.stacked(this, 6));
+            }
+            int mod = ModifierLatch.ALL[i];
+            Button b = Ui.iconButton(this, ModifierLatch.labelFor(mod));
+            b.setOnClickListener(v -> toggleModifier(mod));
+            modifierButtons.put(mod, b);
+            row.addView(b, iconSlot(i % 2 == 0 ? 0 : Ui.dp(this, 6)));
+        }
+    }
+
+    /**
+     * Latches or releases one modifier, sending the real key press or release
+     * that goes with it.
+     *
+     * <p>Sending the key itself -- rather than only remembering a bit to OR
+     * into later keystrokes -- is what makes a bare Super tap open the
+     * overview and what lets a latched Super affect a joystick drag. See
+     * {@link ModifierLatch}'s class comment.
+     */
+    private void toggleModifier(int mod) {
+        boolean nowLatched = modifiers.toggle(mod);
+        int keycode = ModifierLatch.keycodeFor(mod);
+        if (keycode >= 0) {
+            enqueue(Protocol.key(keycode, nowLatched, modifiers.mask()));
+        }
+        refreshModifierButton(mod);
+    }
+
+    /** Latched modifiers read as active rather than merely available -- this
+     *  is the one piece of state where forgetting it is on silently changes
+     *  what every keystroke does. */
+    private void refreshModifierButton(int mod) {
+        Button b = modifierButtons.get(mod);
+        if (b == null) return;
+        boolean on = modifiers.isLatched(mod);
+        b.setBackground(Ui.pressable(on ? Ui.ACCENT : Ui.RAISED, Ui.HAIRLINE, 10f, this));
+        b.setTextColor(on ? Ui.BASE : Ui.TEXT);
+    }
+
+    /**
+     * Releases every latched modifier on the host and clears the bar.
+     *
+     * <p>Called from {@link #teardown()}: a session that ends with Super
+     * latched would otherwise leave the laptop believing Super is still
+     * physically held, which makes the desktop behave bizarrely with no
+     * indication why and nothing on the phone still able to fix it.
+     */
+    private void releaseLatchedModifiers() {
+        for (int mod : ModifierLatch.ALL) {
+            if (modifiers.isLatched(mod)) {
+                int keycode = ModifierLatch.keycodeFor(mod);
+                if (keycode >= 0 && connected) {
+                    enqueue(Protocol.key(keycode, false, 0));
+                }
+            }
+        }
+        modifiers.clear();
+        for (int mod : ModifierLatch.ALL) {
+            refreshModifierButton(mod);
+        }
     }
 
     /**
@@ -941,6 +1030,8 @@ public class MainActivity extends Activity {
         content.addView(aspectButton, Ui.stacked(this, 6));
         updateAspectButton();
 
+        content.addView(buildSensitivityRow(), Ui.stacked(this, 6));
+
         logButton = Ui.button(this, "📋  Session log");
         logButton.setOnClickListener(v -> {
             dismissSettings();
@@ -962,6 +1053,63 @@ public class MainActivity extends Activity {
         settingsOverlayView = overlay;
         rootLayout.addView(overlay, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    /**
+     * The joystick sensitivity slider.
+     *
+     * <p>Applied live as it is dragged, not on release: the only way to judge
+     * a pointer speed is to feel it, and a control you have to commit to
+     * before finding out what it does makes you guess. The value is saved
+     * once the finger lifts rather than on every pixel of travel, so a drag
+     * across the whole range is one write instead of a hundred.
+     */
+    private LinearLayout buildSensitivityRow() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(Ui.rect(Ui.RAISED, 10f, this));
+        box.setPadding(Ui.md(this), Ui.md(this), Ui.md(this), Ui.md(this));
+
+        TextView label = Ui.body(this, "");
+        label.setTypeface(Ui.medium());
+        box.addView(label);
+
+        TextView value = Ui.mono(this);
+        value.setTextColor(Ui.TEXT_FAINT);
+        box.addView(value, Ui.stacked(this, 4));
+
+        SeekBar bar = new SeekBar(this);
+        // The SeekBar's own units are an implementation detail: it runs
+        // 0..range and is mapped onto MIN..MAX px/s, so the slider's ends
+        // always mean the supported extremes whatever those are retuned to.
+        int range = (int) (CursorDriver.MAX_SPEED_PX_S - CursorDriver.MIN_SPEED_PX_S);
+        bar.setMax(range);
+        bar.setProgress((int) (sensitivity - CursorDriver.MIN_SPEED_PX_S));
+
+        Runnable render = () -> {
+            label.setText("🕹  Joystick sensitivity");
+            value.setText(String.format(java.util.Locale.US,
+                    "%d px/s at full push", (int) sensitivity));
+        };
+        render.run();
+
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+                sensitivity = CursorDriver.clampSpeed(CursorDriver.MIN_SPEED_PX_S + progress);
+                if (cursorDriver != null) cursorDriver.setMaxSpeed(sensitivity);
+                render.run();
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar sb) {}
+
+            @Override public void onStopTrackingTouch(SeekBar sb) {
+                ConnectionState.saveSensitivity(MainActivity.this, sensitivity);
+            }
+        });
+        box.addView(bar, Ui.stacked(this, 4));
+
+        return box;
     }
 
     private void dismissSettings() {
@@ -1336,6 +1484,7 @@ public class MainActivity extends Activity {
             }
         }
         if (cursorDriver != null) cursorDriver.stop();
+        releaseLatchedModifiers();
 
         connected = false;
         decodedFrames = 0;
@@ -1524,9 +1673,16 @@ public class MainActivity extends Activity {
     }
 
     private void sendChar(char c) {
+        // Latched modifiers ride along with every keystroke. The modifier
+        // keys themselves are already physically held on the host (see
+        // toggleModifier), but the bitmask has to accompany each event too --
+        // the host sets the compositor's depressed-modifier state from it on
+        // every key, so omitting it here would clear the modifier for exactly
+        // the keystroke it was meant to apply to.
+        int latched = modifiers.mask();
         if (c == '\b') {
-            enqueue(Protocol.key(Keycodes.KEY_BACKSPACE, true, 0));
-            enqueue(Protocol.key(Keycodes.KEY_BACKSPACE, false, 0));
+            enqueue(Protocol.key(Keycodes.KEY_BACKSPACE, true, latched));
+            enqueue(Protocol.key(Keycodes.KEY_BACKSPACE, false, latched));
             return;
         }
         int[] mapping = Keycodes.lookup(c);
@@ -1535,7 +1691,7 @@ public class MainActivity extends Activity {
             return;
         }
         int code = mapping[0];
-        int mods = mapping[1] != 0 ? Protocol.MOD_SHIFT : 0;
+        int mods = latched | (mapping[1] != 0 ? Protocol.MOD_SHIFT : 0);
         enqueue(Protocol.key(code, true, mods));
         enqueue(Protocol.key(code, false, mods));
     }

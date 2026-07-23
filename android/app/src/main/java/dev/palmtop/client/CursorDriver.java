@@ -35,8 +35,18 @@ final class CursorDriver {
      *  continuously. */
     static final float DEADZONE = 0.12f;
 
-    /** Host pixels per second at full deflection. */
-    static final float MAX_SPEED_PX_S = 1200f;
+    /** Host pixels per second at full deflection, at the slowest and fastest
+     *  ends of the sensitivity slider. The usable range was chosen so that
+     *  the slow end is genuinely usable for pixel work rather than merely
+     *  "less fast", and the fast end still crosses a 1080p desktop in about
+     *  a second. */
+    static final float MIN_SPEED_PX_S = 200f;
+    static final float MAX_SPEED_PX_S = 1600f;
+
+    /** Where the slider starts. Deliberately well below the original fixed
+     *  1200: that first value was reasoned about rather than felt, and the
+     *  first person to actually use it found it too fast. */
+    static final float DEFAULT_SPEED_PX_S = 700f;
 
     /** Motion tick, ~60Hz. */
     static final long TICK_MS = 16L;
@@ -60,11 +70,29 @@ final class CursorDriver {
     private float vectorX, vectorY;
     private boolean ticking;
     private long lastTickAt;
+    /** Live, user-adjustable -- see {@link #setMaxSpeed}. */
+    private float maxSpeedPxS = DEFAULT_SPEED_PX_S;
 
     private final Runnable tick = this::onTick;
 
     CursorDriver(Sink sink) {
         this.sink = sink;
+    }
+
+    /** Sets the speed at full deflection, clamped to the supported range.
+     *  Takes effect on the next tick, so it can be changed mid-push. */
+    void setMaxSpeed(float pxPerSecond) {
+        maxSpeedPxS = clampSpeed(pxPerSecond);
+    }
+
+    float maxSpeed() {
+        return maxSpeedPxS;
+    }
+
+    static float clampSpeed(float pxPerSecond) {
+        if (pxPerSecond < MIN_SPEED_PX_S) return MIN_SPEED_PX_S;
+        if (pxPerSecond > MAX_SPEED_PX_S) return MAX_SPEED_PX_S;
+        return pxPerSecond;
     }
 
     /**
@@ -74,9 +102,10 @@ final class CursorDriver {
      * @param vx stick x, -1..1
      * @param vy stick y, -1..1 (screen convention: down is positive)
      * @param elapsedMs real time since the previous tick
+     * @param maxSpeedPxS speed at full deflection, in host pixels per second
      * @return {dx, dy} in host desktop pixels
      */
-    static float[] deltaFor(float vx, float vy, long elapsedMs) {
+    static float[] deltaFor(float vx, float vy, long elapsedMs, float maxSpeedPxS) {
         float raw = (float) Math.hypot(vx, vy);
         if (raw < DEADZONE) return new float[] { 0f, 0f };
 
@@ -87,7 +116,7 @@ final class CursorDriver {
         if (m > 1f) m = 1f;
 
         // Squared response: fine near centre, full speed at the rim.
-        float speed = m * m * MAX_SPEED_PX_S;
+        float speed = m * m * maxSpeedPxS;
 
         long dt = Math.min(elapsedMs, MAX_TICK_MS);
         float distance = speed * (dt / 1000f);
@@ -129,7 +158,7 @@ final class CursorDriver {
         long elapsed = now - lastTickAt;
         lastTickAt = now;
 
-        float[] d = deltaFor(vectorX, vectorY, elapsed);
+        float[] d = deltaFor(vectorX, vectorY, elapsed, maxSpeedPxS);
         if (d[0] != 0f || d[1] != 0f) {
             sink.move(d[0], d[1]);
         }
