@@ -437,12 +437,19 @@ public class MainActivity extends Activity {
 
         buildModifierBar();
 
-        // Esc and Tab: the two keys a desktop needs constantly that no phone
-        // IME offers. Placed after the modifier bar deliberately -- latch Alt
-        // and tap Tab for a real Alt+Tab, so the two rows read as one group.
+        // Esc, Tab and Enter: the keys a desktop needs constantly that a
+        // phone IME either hides or binds to something else (Android's own
+        // Enter is consumed by the text field). Placed after the modifier bar
+        // deliberately -- latch Alt and tap Tab for a real Alt+Tab, so the
+        // rows read as one group.
         joystickSlot.addView(
-                twoUp("Esc", () -> sendKeyTap(Keycodes.KEY_ESC),
-                      "Tab", () -> sendKeyTap(Keycodes.KEY_TAB)),
+                buttonRow(
+                        new String[] { "Esc", "Tab", "↵" },
+                        new Runnable[] {
+                                () -> sendKeyTap(Keycodes.KEY_ESC),
+                                () -> sendKeyTap(Keycodes.KEY_TAB),
+                                () -> sendKeyTap(Keycodes.KEY_ENTER),
+                        }),
                 Ui.stacked(this, 6));
     }
 
@@ -582,19 +589,26 @@ public class MainActivity extends Activity {
         return lp;
     }
 
-    /** A two-up row of buttons in the column -- the shape every control pair
-     *  here uses, so the layout stays one consistent grid rather than each
-     *  addition inventing its own spacing. */
-    private LinearLayout twoUp(String leftLabel, Runnable onLeft,
-                               String rightLabel, Runnable onRight) {
+    /**
+     * A row of equally-sized buttons in the column -- the shape every control
+     * group here uses, so the layout stays one consistent grid rather than
+     * each addition inventing its own spacing.
+     *
+     * <p>Takes any number of buttons because the key row needs three where
+     * the others need two: adding a fourth *row* would have pushed the column
+     * past the height a landscape phone actually has, whereas a third button
+     * in an existing row costs nothing vertically and still leaves each one
+     * around 44dp wide.
+     */
+    private LinearLayout buttonRow(String[] labels, Runnable[] actions) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        Button left = Ui.iconButton(this, leftLabel);
-        left.setOnClickListener(v -> onLeft.run());
-        row.addView(left, iconSlot(0));
-        Button right = Ui.iconButton(this, rightLabel);
-        right.setOnClickListener(v -> onRight.run());
-        row.addView(right, iconSlot(Ui.dp(this, 6)));
+        for (int i = 0; i < labels.length; i++) {
+            Runnable action = actions[i];
+            Button b = Ui.iconButton(this, labels[i]);
+            b.setOnClickListener(v -> action.run());
+            row.addView(b, iconSlot(i == 0 ? 0 : Ui.dp(this, 6)));
+        }
         return row;
     }
 

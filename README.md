@@ -131,7 +131,7 @@ The left column keeps only what you use during a session:
 | **Joystick** | Nudge the cursor precisely, for window edges and text carets |
 | **L** / **R** | Left and right click, wherever the cursor currently is |
 | **Ctrl Alt Shift ❖** | Modifier keys — tap to latch, tap again to release |
-| **Esc** / **Tab** | The two keys no phone keyboard has. Latch Alt + tap Tab = Alt+Tab |
+| **Esc** / **Tab** / **↵** | Keys the phone keyboard hides or swallows. Latch Alt + tap Tab = Alt+Tab |
 
 Tapping the video still clicks exactly where you tapped — the joystick is an
 addition, not a replacement. It is there for the things a fingertip is too
