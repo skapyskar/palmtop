@@ -130,6 +130,7 @@ The left column keeps only what you use during a session:
 | **⌨** | Keyboard |
 | **Joystick** | Nudge the cursor precisely, for window edges and text carets |
 | **L** / **R** | Left and right click, wherever the cursor currently is |
+| **Ctrl Alt Shift ❖** | Modifier keys — tap to latch, tap again to release |
 
 Tapping the video still clicks exactly where you tapped — the joystick is an
 addition, not a replacement. It is there for the things a fingertip is too
@@ -137,6 +138,25 @@ blunt for: grabbing a window edge, placing a text caret. Because the **L**
 button sends a real press and release rather than a synthesised click,
 **holding L while moving the joystick drags** — which is how you resize a
 window or select text.
+
+### Modifier keys
+
+The modifier buttons **latch**: tap **❖** and it stays held (the button
+lights up) until you tap it again. They latch rather than needing to be held
+down because Android's keyboard covers the screen in landscape — the button
+would not be there at the moment you type the second key.
+
+They press the real key, so all of this works:
+
+| | |
+|---|---|
+| **❖** then a letter | `Super+D`, `Super+E`, … — tap **❖** off afterwards |
+| **❖** on, then off | Opens the GNOME overview / KDE launcher, same as tapping Super |
+| **❖** on, then joystick + **L** | `Super+drag` — move a window from anywhere in it |
+| **Ctrl** then a letter | `Ctrl+C`, `Ctrl+T`, … |
+
+Latched modifiers are released automatically if the connection drops, so
+your laptop can never be left with a stuck Super key.
 
 Everything else lives behind **⚙**:
 
@@ -147,6 +167,7 @@ Everything else lives behind **⚙**:
 | **🖥 Devices** | Switch laptops, or pair another |
 | **⚙ Mode** | Quality preset — see below |
 | **▭ Aspect** | Best Fit / 16:9 / 4:3 / 1:1 |
+| **🕹 Sensitivity** | How fast the joystick moves the cursor |
 | **📋 Session log** | What the laptop is doing, and what failed |
 | **📊 Stats** | Live latency figures |
 
