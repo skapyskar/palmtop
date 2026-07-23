@@ -25,12 +25,27 @@ use pw::stream::StreamFlags;
 
 use crate::capture::{monotonic_us, Frame, FrameSlot, PixelFormat};
 
-/// Walks the portal ScreenCast flow. Async because `ashpd` is; the result
-/// (node id + fd) is handed to [`run`], which is synchronous and blocking.
-/// The advertised `(width, height)` lets the caller configure the encoder
-/// immediately, without waiting for PipeWire's own format-negotiation
-/// callback (which fires slightly later, inside the capture loop).
-pub async fn request_screencast() -> Result<(u32, std::os::fd::OwnedFd, (u32, u32))> {
+/// Everything [`request_screencast`] obtained that [`run`] needs to actually
+/// start streaming: the PipeWire node to connect to, and the fd the portal
+/// handed over for that connection.
+///
+/// Named and opaque to callers outside this module -- `session.rs` never
+/// looks inside it, just carries it from `request_screencast` to `run` --
+/// specifically so the Windows capture backend can hold something shaped
+/// completely differently (a D3D11 device and capture item, not a node id
+/// and fd) behind the exact same two-function call shape. See
+/// `platform::mod`'s doc comment for why that symmetry matters.
+pub struct ScreencastHandle {
+    node_id: u32,
+    fd: std::os::fd::OwnedFd,
+}
+
+/// Walks the portal ScreenCast flow. Async because `ashpd` is; the result is
+/// handed to [`run`], which is synchronous and blocking. The advertised
+/// `(width, height)` lets the caller configure the encoder immediately,
+/// without waiting for PipeWire's own format-negotiation callback (which
+/// fires slightly later, inside the capture loop).
+pub async fn request_screencast() -> Result<(ScreencastHandle, (u32, u32))> {
     let proxy = Screencast::new().await.context("connect to portal")?;
     let session = proxy.create_session().await.context("create session")?;
     proxy
@@ -57,17 +72,13 @@ pub async fn request_screencast() -> Result<(u32, std::os::fd::OwnedFd, (u32, u3
         .size()
         .context("portal stream did not advertise a size")?;
     let fd = proxy.open_pipe_wire_remote(&session).await.context("open_pipe_wire_remote")?;
-    Ok((node_id, fd, (w as u32, h as u32)))
+    Ok((ScreencastHandle { node_id, fd }, (w as u32, h as u32)))
 }
 
 /// Blocking; runs the PipeWire main loop until `stop` is set. Intended to be
 /// called from its own OS thread.
-pub fn run(
-    fd: std::os::fd::OwnedFd,
-    node_id: u32,
-    slot: Arc<FrameSlot>,
-    stop: Arc<AtomicBool>,
-) -> Result<()> {
+pub fn run(handle: ScreencastHandle, slot: Arc<FrameSlot>, stop: Arc<AtomicBool>) -> Result<()> {
+    let ScreencastHandle { node_id, fd } = handle;
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).context("pw main loop")?;
     let context = pw::context::ContextRc::new(&mainloop, None).context("pw context")?;

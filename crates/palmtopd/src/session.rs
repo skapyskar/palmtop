@@ -351,7 +351,7 @@ fn handle_client(
     // that was a bug -- see main.rs). The portal's DBus connection lives
     // inside it and must stay up for as long as the PipeWire stream it
     // granted is in use, not just for the duration of the initial request.
-    let (node_id, fd, (width, height)) = match rt.block_on(platform::capture::request_screencast()) {
+    let (screencast, (width, height)) = match rt.block_on(platform::capture::request_screencast()) {
         Ok(v) => v,
         Err(e) => {
             send_status(
@@ -383,7 +383,7 @@ fn handle_client(
     let cap_handle = {
         let (slot, stop, out_tx) = (slot.clone(), stop.clone(), out_tx.clone());
         thread::spawn(move || {
-            if let Err(e) = platform::capture::run(fd, node_id, slot, stop) {
+            if let Err(e) = platform::capture::run(screencast, slot, stop) {
                 eprintln!("[capture] {e:#}");
                 // Capture dying mid-session (the user revoked sharing, the
                 // compositor restarted) is otherwise indistinguishable on the

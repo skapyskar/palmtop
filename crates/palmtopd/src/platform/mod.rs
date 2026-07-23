@@ -27,8 +27,12 @@ pub use linux::{capture, doctor, input};
 
 // Declared unconditionally (not `#[cfg(windows)]`) so `windows::keymap` --
 // pure table-lookup logic, no `windows`-crate dependency -- compiles and
-// runs its tests on every platform, including this one. `capture` and
-// `doctor` don't exist yet (later phases of the Windows host-support plan);
-// once they do, this module's `cfg(windows)` re-export line joins the Linux
-// one above.
+// runs its tests on every platform, including this one.
 mod windows;
+// `windows::doctor` doesn't exist yet (a later phase of the Windows
+// host-support plan), so this can't yet re-export `doctor` the way the
+// Linux `pub use` above does -- `main.rs`'s `use platform::doctor` will not
+// resolve on a Windows build until that phase lands. `capture` and `input`
+// are both complete enough to wire in now.
+#[cfg(windows)]
+pub use self::windows::{capture, input};

@@ -20,4 +20,8 @@
 pub mod keymap;
 
 #[cfg(windows)]
+pub mod capture;
+#[cfg(windows)]
 pub mod input;
+
+// `doctor` lands in a later phase of the Windows host-support plan.
