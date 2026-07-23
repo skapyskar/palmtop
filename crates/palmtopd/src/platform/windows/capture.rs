@@ -46,6 +46,7 @@ use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
+use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -111,8 +112,14 @@ pub fn run(handle: ScreencastHandle, slot: Arc<FrameSlot>, stop: Arc<AtomicBool>
     let ScreencastHandle { device, context, item } = handle;
 
     let dxgi_device: IDXGIDevice = device.cast().context("ID3D11Device as IDXGIDevice")?;
-    let d3d_device = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
-        .context("CreateDirect3D11DeviceFromDXGIDevice")?;
+    // Returns an IInspectable; CreateFreeThreaded below wants the concrete
+    // IDirect3DDevice (the WinRT projection of the same underlying device), so
+    // cast across -- both are the same COM object, this only re-types the
+    // handle.
+    let d3d_device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device) }
+        .context("CreateDirect3D11DeviceFromDXGIDevice")?
+        .cast()
+        .context("IInspectable as IDirect3DDevice")?;
 
     let size = item.Size().context("GraphicsCaptureItem::Size")?;
     let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
