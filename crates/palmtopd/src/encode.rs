@@ -16,9 +16,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use pipewire::spa::param::video::VideoFormat;
 
-use crate::capture::FrameSlot;
+use crate::capture::{FrameSlot, PixelFormat};
 
 pub struct EncodedUnit {
     pub keyframe: bool,
@@ -267,7 +266,7 @@ pub fn run_feeder(
     while let Some(frame) = slot.take_latest_blocking(&stop) {
         if !checked_format {
             checked_format = true;
-            if frame.format != VideoFormat::BGRA {
+            if frame.format != PixelFormat::Bgra {
                 eprintln!(
                     "[encode] FATAL: compositor negotiated {:?}, but ffmpeg was started \
                      expecting BGRA ({}x{}) -- refusing to feed mismatched data",

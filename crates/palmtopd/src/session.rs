@@ -22,8 +22,9 @@ use anyhow::{bail, Context, Result};
 use palmtop_config::HostConfig;
 use palmtop_proto::{noise, Message, NoiseTransport, PROTOCOL_VERSION};
 
-use crate::capture::{self, FrameSlot};
+use crate::capture::{monotonic_us, FrameSlot};
 use crate::encode;
+use crate::platform;
 
 /// Every message after the Noise handshake goes through this, guarded by a
 /// Mutex because the reader and writer threads each hold an independent
@@ -350,7 +351,7 @@ fn handle_client(
     // that was a bug -- see main.rs). The portal's DBus connection lives
     // inside it and must stay up for as long as the PipeWire stream it
     // granted is in use, not just for the duration of the initial request.
-    let (node_id, fd, (width, height)) = match rt.block_on(capture::request_screencast()) {
+    let (node_id, fd, (width, height)) = match rt.block_on(platform::capture::request_screencast()) {
         Ok(v) => v,
         Err(e) => {
             send_status(
@@ -382,7 +383,7 @@ fn handle_client(
     let cap_handle = {
         let (slot, stop, out_tx) = (slot.clone(), stop.clone(), out_tx.clone());
         thread::spawn(move || {
-            if let Err(e) = capture::run(fd, node_id, slot, stop) {
+            if let Err(e) = platform::capture::run(fd, node_id, slot, stop) {
                 eprintln!("[capture] {e:#}");
                 // Capture dying mid-session (the user revoked sharing, the
                 // compositor restarted) is otherwise indistinguishable on the
@@ -648,7 +649,7 @@ fn run_network_reader(
             Ok(Some(Message::Ping { nonce, t_client_us })) => {
                 // Stamped here, the instant it is parsed, so the client's RTT
                 // excludes however long we then take to schedule the reply.
-                let t_host_recv_us = capture::monotonic_us();
+                let t_host_recv_us = monotonic_us();
                 let _ = out_tx.send(Outgoing::Pong { nonce, t_client_us, t_host_recv_us });
             }
             Ok(Some(Message::SetMode { mode })) => match crate::modes::Mode::from_u8(mode) {
@@ -707,7 +708,7 @@ fn run_writer(
                     // Taken here, immediately before serialising, so the
                     // interval the client subtracts genuinely covers the whole
                     // time we held the probe.
-                    t_host_send_us: capture::monotonic_us(),
+                    t_host_send_us: monotonic_us(),
                 },
                 Outgoing::Reconfigure(msg) => {
                     // Drop any frame the previous encoder left pending. Its

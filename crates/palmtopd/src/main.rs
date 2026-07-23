@@ -1,10 +1,12 @@
 mod capture;
-mod doctor;
 mod encode;
-mod input;
 mod modes;
 mod pairing;
+mod platform;
 mod session;
+
+use platform::doctor;
+use platform::input;
 
 use std::sync::mpsc;
 use std::thread;
