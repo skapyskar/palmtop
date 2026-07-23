@@ -24,3 +24,11 @@
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{capture, doctor, input};
+
+// Declared unconditionally (not `#[cfg(windows)]`) so `windows::keymap` --
+// pure table-lookup logic, no `windows`-crate dependency -- compiles and
+// runs its tests on every platform, including this one. `capture` and
+// `doctor` don't exist yet (later phases of the Windows host-support plan);
+// once they do, this module's `cfg(windows)` re-export line joins the Linux
+// one above.
+mod windows;

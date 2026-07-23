@@ -7,20 +7,32 @@ description = "Host daemon: continuous portal capture -> VA-API encode -> networ
 
 [dependencies]
 anyhow = "1"
-ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
-pipewire = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-wayland-client = "0.31"
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-wayland-protocols-misc = { version = "0.3", features = ["client"] }
-xkbcommon = "0.8"
 mdns-sd = "0.20"
 qrcode = "0.14"
 # std::net::TcpStream exposes neither SO_SNDBUF (the one pipeline stage
 # "never queue" was not reaching -- see session::set_send_buffer) nor TCP
 # keepalive (without which a phone that sleeps or loses Wi-Fi wedges a
 # session forever -- see session::configure_socket). The "all" feature is
-# what gates keepalive retry counts on Linux.
+# what gates keepalive retry counts on Linux, and TCP keepalive on Windows.
 socket2 = { version = "0.5", features = ["all"] }
 palmtop-config = { path = "../palmtop-config" }
 palmtop-proto = { path = "../palmtop-proto" }
+
+# Portal screen capture, PipeWire, and wlr virtual-input are all
+# Linux/Wayland-specific -- see platform::linux. Nothing here links or even
+# compiles on another target.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+pipewire = "0.10"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.8"
+
+# SendInput (mouse/keyboard injection) -- see platform::windows::input.
+# Kept to the one feature the input path actually calls, same reasoning as
+# palmtop-config's windows dependency: less surface area to compile on a
+# target this crate can't be checked against locally.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_UI_Input_KeyboardAndMouse"] }
