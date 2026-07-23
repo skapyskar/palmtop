@@ -256,6 +256,24 @@ public class MainActivity extends Activity {
 
         LinearLayout mainLayout = new LinearLayout(this);
         mainLayout.setOrientation(LinearLayout.HORIZONTAL);
+        // A small breathing space above everything. Without the title bar
+        // (removed in v0.3.0) the video sat flush against the phone's top
+        // edge, which made the laptop's own top-corner UI -- window close
+        // buttons, menu bars -- awkward to hit and easy to lose to the
+        // system's edge gestures.
+        //
+        // Applied to this parent rather than to videoContainer deliberately:
+        // parent padding reduces the child's allocated size, so
+        // videoContainer.getHeight() already reflects the inset and
+        // resizeSurfaceToFit re-fits correctly with no change to its logic.
+        // Padding videoContainer itself would be silently ignored -- it
+        // measures getWidth()/getHeight() *including* its own padding and
+        // centers videoClip within the full bounds. Insetting here also
+        // fixes the same reachability problem for the column's top button.
+        //
+        // Costs the video 12dp of height; its aspect ratio is untouched
+        // (VideoFit letterboxes as always) and its width is unchanged.
+        mainLayout.setPadding(0, Ui.md(this), 0, 0);
         root.addView(mainLayout, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
