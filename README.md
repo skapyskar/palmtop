@@ -122,16 +122,33 @@ network you do not trust, prefer USB or QR.
 Tap where you want to click — it works like a touchscreen, not like a laptop
 trackpad. Drag to drag. The **⌨** button opens the keyboard.
 
-The left column has everything else:
+The left column keeps only what you use during a session:
 
 | | |
 |---|---|
+| **⚙** | Settings — everything below |
+| **⌨** | Keyboard |
+| **Joystick** | Nudge the cursor precisely, for window edges and text carets |
+| **L** / **R** | Left and right click, wherever the cursor currently is |
+
+Tapping the video still clicks exactly where you tapped — the joystick is an
+addition, not a replacement. It is there for the things a fingertip is too
+blunt for: grabbing a window edge, placing a text caret. Because the **L**
+button sends a real press and release rather than a synthesised click,
+**holding L while moving the joystick drags** — which is how you resize a
+window or select text.
+
+Everything else lives behind **⚙**:
+
+| | |
+|---|---|
+| **Status** | Whether you are connected, and to what |
 | **⟳ Reconnect** | Retry after a network hiccup |
 | **🖥 Devices** | Switch laptops, or pair another |
 | **⚙ Mode** | Quality preset — see below |
 | **▭ Aspect** | Best Fit / 16:9 / 4:3 / 1:1 |
-| **📊** | Live latency stats |
-| **📋** | Session log — what the laptop is doing, and what failed |
+| **📋 Session log** | What the laptop is doing, and what failed |
+| **📊 Stats** | Live latency figures |
 
 **Three fingers** on the video zooms and pans, for reading something small.
 One-finger taps keep working normally.
@@ -146,8 +163,8 @@ One-finger taps keep working normally.
 | **Battery** | Longest phone battery life and least data. |
 
 Measured on a mid-range phone over a hotspot, Sync runs about **52 ms** end to
-end versus about **90 ms** for Balanced. Your numbers will differ; the **📊**
-button shows real ones for your own setup.
+end versus about **90 ms** for Balanced. Your numbers will differ; **⚙ → 📊
+Stats** shows real ones for your own setup.
 
 The app tells the laptop its screen size, refresh rate and decoder limits when
 it connects, and the laptop sizes the stream to match. There is nothing to
@@ -177,9 +194,9 @@ palmtopd --doctor
 
 Two things worth knowing. The share prompt is only requested **when a phone
 actually connects**, so it appearing at pairing time is not expected. And the
-app has a **📋 log button**: it shows what the laptop reported at every stage,
-including which one failed, so you rarely have to read the laptop's logs at
-all.
+app keeps a session log under **⚙ → 📋 Session log**: it shows what the laptop
+reported at every stage, including which one failed, so you rarely have to read
+the laptop's logs at all.
 
 **`pair-usb.sh` says no phone found.**
 Check USB debugging is on, the cable carries data (some charge-only cables do
@@ -194,7 +211,7 @@ address.
 
 **The picture lags during video playback.**
 Switch to **Sync** mode. If it is still bad, the network is the bottleneck —
-check the **📊** stats, and prefer the phone's hotspot over shared Wi-Fi.
+check **⚙ → 📊 Stats**, and prefer the phone's hotspot over shared Wi-Fi.
 
 **Logs:**
 
