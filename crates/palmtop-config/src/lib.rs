@@ -828,13 +828,16 @@ pub fn config_dir() -> Result<PathBuf> {
         }
     }
 
+    // Each cfg block is the function's tail on its own platform (they are
+    // mutually exclusive), so neither needs an explicit `return` -- and on
+    // Windows clippy's needless_return fires if one has it.
     #[cfg(windows)]
     {
         let base = std::env::var("APPDATA").map(PathBuf::from).context(
             "could not locate the config directory -- %APPDATA% is not set; set \
              PALMTOP_CONFIG_DIR explicitly",
         )?;
-        return Ok(base.join("palmtop"));
+        Ok(base.join("palmtop"))
     }
     #[cfg(not(windows))]
     {

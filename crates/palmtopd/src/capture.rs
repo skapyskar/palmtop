@@ -22,6 +22,12 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PixelFormat {
     Bgra,
+    // Only ever constructed by the Linux capture backend, which negotiates
+    // whatever format the compositor offers and reports a non-BGRA one here.
+    // The Windows backend creates its frame pool as BGRA by construction, so
+    // it never builds this variant -- hence dead on non-Linux targets, which
+    // is correct, not a smell.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Other(String),
 }
 

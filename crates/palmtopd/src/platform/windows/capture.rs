@@ -257,7 +257,11 @@ fn primary_monitor() -> Result<HMONITOR> {
     let mut found: Option<HMONITOR> = None;
     unsafe {
         let found_ptr = &mut found as *mut Option<HMONITOR> as isize;
-        EnumDisplayMonitors(
+        // Returns FALSE if the callback stopped enumeration early -- which is
+        // exactly what monitor_enum_proc does on finding the primary monitor,
+        // so a FALSE here is success, not failure. The result of `found`
+        // below is the real signal; this return is genuinely nothing to act on.
+        let _ = EnumDisplayMonitors(
             None,
             None,
             Some(monitor_enum_proc),
