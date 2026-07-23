@@ -138,7 +138,16 @@ pub fn run(handle: ScreencastHandle, slot: Arc<FrameSlot>, stop: Arc<AtomicBool>
     let handler = TypedEventHandler::<Direct3D11CaptureFramePool, windows::core::IInspectable>::new(
         move |frame_pool, _| {
             let Some(pool) = frame_pool else { return Ok(()) };
-            while let Ok(frame) = pool.TryGetNextFrame() {
+            // Exactly one frame per event, not a drain loop. FrameArrived
+            // fires once per captured frame, so one-per-event is both correct
+            // and the documented pattern -- whereas looping until
+            // TryGetNextFrame stops returning Ok assumes a failure mode that
+            // is not guaranteed to occur, and would spin the frame pool's own
+            // worker thread if it never did. The frame pool is created with a
+            // single buffer anyway (see below), so there is never a backlog
+            // here to drain: that is the "never queue, drop stale" invariant
+            // doing its job one stage earlier.
+            if let Ok(frame) = pool.TryGetNextFrame() {
                 if let Err(e) = publish_frame(&frame, &handler_device, &handler_context, &handler_slot) {
                     eprintln!("[capture] dropped a frame: {e:#}");
                 }

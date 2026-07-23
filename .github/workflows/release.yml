@@ -1,13 +1,19 @@
 name: Release
 
-# Tag-driven, not push-driven: cutting a release should be an explicit act.
+# Publishing is tag-driven -- cutting a release should be an explicit act:
 #   git tag v0.1.0 && git push --tags
 #
-# workflow_dispatch is kept so the build can be exercised without minting a
-# tag -- a release pipeline that is only ever run for real releases is one
-# that breaks at exactly the worst moment.
+# But the *build* runs on every push to master too, because a release
+# pipeline that is only ever exercised for real releases is one that breaks
+# at exactly the worst moment. That is not hypothetical here: the Windows
+# job's first execution ever was during a release, and it stalled, holding
+# the release hostage to a problem that a plain master push would have
+# surfaced harmlessly days earlier. The `release` job below stays gated on
+# `refs/tags/v*`, so branch pushes build and upload artifacts for inspection
+# without publishing anything.
 on:
   push:
+    branches: [master]
     tags: ['v*']
   workflow_dispatch:
 
@@ -178,57 +184,51 @@ jobs:
 
   host-windows:
     name: Windows host daemon
-    # DISABLED until the Windows host is actually verified on real hardware.
-    # The code is on master and this job is kept working, but Windows is not
-    # shipped in releases yet and must not gate them -- see the `release`
-    # job's `needs`. Flip this to `true` (and add host-windows back to that
-    # `needs` list) once a real Windows machine has confirmed capture and
-    # input work.
+    # Built natively on a real Windows runner against the MSVC toolchain,
+    # rather than cross-compiled from Linux via mingw-w64 (which is what this
+    # job did first, and which produced two problems worth not repeating):
     #
-    # Also unblocks releases from this job's own flakiness: its first real
-    # run stalled for 12+ minutes inside `apt-get update` against the Azure
-    # Ubuntu mirror, which is nothing to do with this project and would have
-    # held a release hostage.
-    if: false
-    # Cross-compiled from an ordinary Linux runner via mingw-w64, rather than
-    # a windows-latest runner -- this job only needs to *build* the Windows
-    # binary; it can never exercise WGC capture or SendInput either way
-    # (a GitHub-hosted runner has no interactive desktop session, Windows or
-    # Linux), so real verification of the platform-specific code happens on
-    # a real Windows machine, not here. A Linux runner is faster and cheaper
-    # for a pure cross-compile.
-    runs-on: ubuntu-latest
-    # A stalled apt mirror should fail this job in minutes, not run until the
-    # 6-hour default ceiling.
+    #  1. It needed `apt-get install gcc-mingw-w64`, and GitHub's Ubuntu
+    #     runners intermittently stall for double-digit minutes against
+    #     azure.archive.ubuntu.com (actions/runner-images#12949, #7048, and
+    #     recurring since #675). The very first run of this job hit exactly
+    #     that. A native Windows build needs no package manager at all, so
+    #     that entire failure mode disappears.
+    #  2. `windows-rs` is developed and tested primarily against MSVC; the
+    #     GNU/mingw target is the less-trodden path for precisely the
+    #     WinRT/COM surface platform::windows::capture leans on.
+    #
+    # The decisive gain, though, is that the tests can actually *run* here.
+    # Cross-compiling produced an .exe no Linux runner could execute, so
+    # keymap's table and doctor's classify_build were only ever verified on
+    # Linux. Now they execute on the OS they describe.
+    runs-on: windows-latest
+    # Windows runners are slower to start and build than Linux ones; 30
+    # minutes is generous for this job while still failing fast if something
+    # genuinely hangs, rather than burning to the 6-hour default ceiling.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
+      # No `targets:` needed -- x86_64-pc-windows-msvc is this runner's
+      # native host target.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-gnu
+          key: windows-msvc
 
-      - name: Install mingw-w64
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 zip
+      # Scoped to the three crates that actually build on Windows. `--workspace`
+      # would drag in the spike-* crates, which are frozen Phase 0 history
+      # bound to pipewire/wayland and Linux-only by construction.
+      - name: Tests
+        run: cargo test -p palmtopd -p palmtop-config -p palmtop-proto
 
-      # No `cargo test` here: a cross-compiled Windows .exe can't run on this
-      # Linux runner without Wine, which is more infrastructure than a build
-      # step justifies. The platform-neutral parts of platform::windows
-      # (keymap, doctor's classify_build) already run their real tests in
-      # the host-linux job above, since those modules compile unconditionally
-      # -- see their own doc comments for why. Clippy still runs here because
-      # it only needs to compile, not execute, the Windows-only code.
-      - name: Clippy (Windows target)
-        run: cargo clippy --target x86_64-pc-windows-gnu -p palmtopd --all-targets -- -D warnings
+      - name: Clippy
+        run: cargo clippy -p palmtopd -p palmtop-config --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --release -p palmtopd --target x86_64-pc-windows-gnu
+        run: cargo build --release -p palmtopd
 
       # BtbN's builds are static, GPL (libx264 included), and published under
       # a stable "latest" release tag -- no version number to keep in sync
@@ -237,29 +237,31 @@ jobs:
       # source for a human installing by hand, but don't offer a URL this
       # stable for automation.
       - name: Fetch ffmpeg.exe
+        shell: pwsh
         run: |
-          curl -fsSL -o /tmp/ffmpeg.zip \
-            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
-          mkdir -p /tmp/ffmpeg-extracted
-          unzip -q /tmp/ffmpeg.zip -d /tmp/ffmpeg-extracted
-          find /tmp/ffmpeg-extracted -name ffmpeg.exe -exec cp {} /tmp/ffmpeg.exe \;
-          test -f /tmp/ffmpeg.exe
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-extracted
+          $exe = Get-ChildItem -Path ffmpeg-extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found in the downloaded archive" }
+          Copy-Item $exe.FullName ffmpeg.exe
+          .\ffmpeg.exe -hide_banner -version | Select-Object -First 1
 
       # Same flat, self-contained layout as the Linux tarball -- install.ps1
       # detects this by palmtopd.exe sitting right beside it (see
       # scripts/install.ps1's own layout-detection comment).
       - name: Stage zip
+        shell: pwsh
         run: |
-          version="${GITHUB_REF_NAME:-dev}"
-          staging="palmtopd-${version}-windows-x86_64"
-          mkdir -p "dist/$staging"
-          cp target/x86_64-pc-windows-gnu/release/palmtopd.exe "dist/$staging/"
-          cp /tmp/ffmpeg.exe "dist/$staging/"
-          cp scripts/install.ps1 scripts/uninstall.ps1 "dist/$staging/"
-          cp config/host.example.toml "dist/$staging/"
-          cp README.md "dist/$staging/" 2>/dev/null || true
-          ( cd dist && zip -qr "${staging}.zip" "$staging" )
-          ls -la dist/
+          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
+          $staging = "palmtopd-$version-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "dist\$staging" | Out-Null
+          Copy-Item target\release\palmtopd.exe "dist\$staging\"
+          Copy-Item ffmpeg.exe "dist\$staging\"
+          Copy-Item scripts\install.ps1, scripts\uninstall.ps1 "dist\$staging\"
+          Copy-Item config\host.example.toml "dist\$staging\"
+          Copy-Item README.md "dist\$staging\" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "dist\$staging" -DestinationPath "dist\$staging.zip"
+          Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -268,10 +270,7 @@ jobs:
 
   release:
     name: Publish release
-    # host-windows is deliberately absent: Windows is built on master but not
-    # shipped until it has been verified on real hardware. Add it back here
-    # (and re-enable the job itself) at that point.
-    needs: [android, host-linux]
+    needs: [android, host-linux, host-windows]
     runs-on: ubuntu-latest
     # Only for real tags. A workflow_dispatch run builds and uploads
     # artifacts for inspection but must not create a GitHub Release.
@@ -287,6 +286,7 @@ jobs:
           files: |
             artifacts/android-apk/*.apk
             artifacts/linux-host/*.tar.gz
+            artifacts/windows-host/*.zip
           generate_release_notes: true
           body: |
             ## Install
