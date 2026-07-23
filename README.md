@@ -1,13 +1,19 @@
 # Palmtop
 
-Use your Linux laptop from your Android phone. The laptop's screen streams to
-the phone; you tap and type on the phone and it lands on the laptop.
+Use your Linux or Windows laptop from your Android phone. The laptop's screen
+streams to the phone; you tap and type on the phone and it lands on the
+laptop.
 
 Everything runs directly between your two devices. There is no account, no
 cloud service, and no server anyone else operates — the video never leaves
 your network, and the connection is encrypted end to end.
 
-**Status:** working and used daily, but early. Linux + Wayland only for now.
+Same phone app either way — you just download the host package that matches
+your laptop's OS.
+
+**Status:** working and used daily, but early. Linux (Wayland) is battle-
+tested; Windows support is new and has not yet had the same live-device
+verification the Linux path has — see [Known limits](#known-limits).
 
 ---
 
@@ -15,13 +21,13 @@ your network, and the connection is encrypted end to end.
 
 | | |
 |---|---|
-| **Laptop** | Linux with a **Wayland** desktop (GNOME, KDE, Hyprland, Sway, …) |
+| **Laptop** | **Linux** with a Wayland desktop (GNOME, KDE, Hyprland, Sway, …) — or **Windows 10** version 1903+ / **Windows 11** |
 | **Phone** | Android 11 or newer |
 | **Both** | On the same Wi-Fi — *or* the laptop joined to the phone's hotspot |
-| **Laptop packages** | `ffmpeg` (almost certainly already installed) |
+| **Laptop packages** | `ffmpeg` — already installed on most Linux systems; bundled in the Windows download |
 
-X11 is not supported yet. To check which you have, run `echo $XDG_SESSION_TYPE`
-on the laptop — it should print `wayland`.
+X11 is not supported on Linux. To check which you have, run
+`echo $XDG_SESSION_TYPE` on the laptop — it should print `wayland`.
 
 ---
 
@@ -37,7 +43,12 @@ has no way to vouch for it. You are trusting this repository instead.
 
 ### 2. Install the host on your laptop
 
-Download the `.tar.gz` from the same release, then:
+Pick the tab for your laptop's OS.
+
+<details open>
+<summary><b>Linux</b></summary>
+
+Download the `.tar.gz` from the [latest release](../../releases/latest), then:
 
 ```bash
 tar -xzf palmtopd-*-linux-x86_64.tar.gz
@@ -53,30 +64,59 @@ cd palmtop
 ./scripts/install.sh
 ```
 
-Either way this installs `palmtopd`, starts it as a background service that
-survives reboots, and prints a QR code. Nothing needs `sudo`.
+Either way this installs `palmtopd`, starts it as a **systemd `--user`
+service** that survives reboots, and prints a QR code. Nothing needs `sudo`.
 
-Installing is always a **clean** install: any previous install is removed
-first, so you can never end up running a stale binary under a config written
-by an older version. That includes the pairing token, so paired phones will
-need to pair again — use `./install.sh --keep-pairing` when upgrading if you
-would rather not re-pair.
-
-### Removing it
+**Removing it:**
 
 ```bash
 ./uninstall.sh
 ```
 
-Removes the service, the binary, the pairing token and the host's private
-key. It asks first, and `--keep-pairing` keeps your phones paired.
+</details>
+
+<details>
+<summary><b>Windows</b></summary>
+
+Download the `.zip` from the [latest release](../../releases/latest), extract
+it, then in PowerShell:
+
+```powershell
+.\install.ps1
+```
+
+This installs `palmtopd.exe` (and the bundled `ffmpeg.exe`) to
+`%LOCALAPPDATA%\Palmtop`, registers a **logon Scheduled Task** — the closest
+Windows equivalent to Linux's systemd service, since a real Windows Service
+runs in a session that cannot capture your desktop or inject input into it —
+and writes the pairing QR to `%TEMP%\palmtop-pair.svg`. Nothing needs
+Administrator.
+
+Windows Defender Firewall may prompt to allow `palmtopd.exe` the first time a
+phone connects; allow it.
+
+**Removing it:**
+
+```powershell
+.\uninstall.ps1
+```
+
+</details>
+
+Both installers are always a **clean** install: any previous install is
+removed first, so you can never end up running a stale binary under a config
+written by an older version. That includes the pairing token, so paired
+phones will need to pair again — pass `--keep-pairing` (`-KeepPairing` on
+Windows) when upgrading if you would rather not re-pair. Uninstalling removes
+the pairing token and the host's private key too; it asks first, and
+`--keep-pairing`/`-KeepPairing` keeps your phones paired there as well.
 
 ### 3. Pair the two
 
 Pick whichever suits you. The result is the same: the laptop is saved in the
 phone's **Devices** list and you reconnect by tapping it.
 
-#### Over a USB cable *(recommended for the first time)*
+#### Over a USB cable *(Linux, recommended for the first time)*
 
 The pairing secret travels over the wire and never touches the network, so
 nothing on your Wi-Fi can observe or interfere with it.
@@ -98,11 +138,18 @@ now on.
 > phone. Turn it back off once you are done pairing if you would rather not
 > leave it on.
 
+USB pairing is Linux-only for now — on Windows, use the QR code below.
+
 #### By scanning a QR code *(no cable needed)*
+
+**Linux:**
 
 ```bash
 ./scripts/show-pair-qr.sh
 ```
+
+**Windows:** `install.ps1` already wrote it to `%TEMP%\palmtop-pair.svg` —
+open that file in any image viewer or browser.
 
 On the phone: **Devices → Add by scanning QR**, and point the camera at it.
 
@@ -227,7 +274,7 @@ not), and that you accepted the "Allow USB debugging?" prompt on the phone.
 `./adb-tools/adb devices` (the release tarball bundles its own `adb`, so no
 separate install is needed) should list it.
 
-**The volume buttons do nothing.**
+**The volume buttons do nothing.** *(Linux)*
 They send the same `XF86AudioRaiseVolume` / `LowerVolume` / `Mute` key presses
 your laptop's own volume keys do — but a key only does something if your
 desktop *binds* it. GNOME and KDE bind them out of the box. A bare wlroots
@@ -241,7 +288,9 @@ bindl = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
 bindl = , XF86AudioMute,        exec, wpctl set-mute   @DEFAULT_AUDIO_SINK@ toggle
 ```
 
-Once those work from the laptop's own keyboard, they work from the phone.
+Once those work from the laptop's own keyboard, they work from the phone. On
+**Windows** this doesn't come up — the volume keys map to `VK_VOLUME_*` and
+work with no configuration.
 
 **It connected once and now will not.**
 Your laptop's IP probably changed. Re-pair — the saved entry updates in place
@@ -255,8 +304,12 @@ check **⚙ → 📊 Stats**, and prefer the phone's hotspot over shared Wi-Fi.
 **Logs:**
 
 ```bash
-journalctl --user -u palmtopd -f
+journalctl --user -u palmtopd -f        # Linux
 ```
+
+On Windows, check Task Scheduler → Task Scheduler Library → **Palmtop** for
+its last run result, or run `palmtopd.exe` directly from a terminal to see
+its output live.
 
 ---
 
@@ -265,9 +318,11 @@ journalctl --user -u palmtopd -f
 - **Encrypted end to end** (Noise protocol) — video and input, not just the
   handshake. Nobody on your network can watch your screen.
 - **No cloud, no account.** Nothing leaves your network.
-- **No root required.** Screen capture goes through the desktop's own
-  permission prompt; input goes through the compositor. If Palmtop asked for
-  root, that would be a much larger thing to trust.
+- **No root or Administrator required.** On Linux, screen capture goes
+  through the desktop's own permission prompt and input through the
+  compositor. On Windows, capture and input both work at ordinary user
+  privilege. If Palmtop asked for elevated access, that would be a much
+  larger thing to trust.
 - **Pair over USB or QR** to hand over the laptop's identity privately. The
   network-discovery path announces it over the LAN instead, which is
   convenient but weaker — noted plainly rather than glossed over.
@@ -278,8 +333,16 @@ journalctl --user -u palmtopd -f
 ## Building from source
 
 ```bash
-cargo build --release -p palmtopd     # laptop daemon
+cargo build --release -p palmtopd     # laptop daemon (builds for the host OS)
 cd android && ./gradlew assembleDebug # phone app
+```
+
+Cross-compiling the Windows daemon from Linux (what CI does):
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+sudo apt install gcc-mingw-w64-x86-64   # or your distro's equivalent
+cargo build --release -p palmtopd --target x86_64-pc-windows-gnu
 ```
 
 Tests:
@@ -302,10 +365,21 @@ cd android && ./gradlew testDebugUnitTest
 
 ## Known limits
 
-- **Wayland only.** No X11 support.
-- **Linux host only.** No macOS or Windows host.
+- **Linux: Wayland only.** No X11 support.
+- **Windows: no elevated input.** A non-elevated `palmtopd` (which is how it
+  always runs — see Security above) cannot send input to windows running as
+  administrator, by Windows' own design (UIPI). Task Manager, admin-elevated
+  apps, and UAC prompts are unreachable from the phone.
+- **No macOS host.**
 - **One phone at a time** per laptop.
 - **No audio.** Video and input only.
+- **No Unicode text input** on either platform yet — ASCII typing only (see
+  `Message::Text` in the protocol, a documented gap on both hosts).
 - **Latency figures exclude the phone's own display response**, which needs
   external hardware to measure. They are honest lower bounds, not
   glass-to-glass numbers.
+- **Windows support is new.** The Linux host has been used daily for weeks;
+  the Windows host has been built to the same standard but not yet verified
+  on real hardware by anyone other than a first-time installer. If something
+  doesn't work, `palmtopd.exe --doctor` is the first thing to run, and an
+  issue report is very welcome.
