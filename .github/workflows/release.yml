@@ -98,7 +98,7 @@ jobs:
           name: android-apk
           path: dist/*.apk
 
-  host:
+  host-linux:
     name: Linux host daemon
     runs-on: ubuntu-latest
     steps:
@@ -175,9 +175,84 @@ jobs:
           name: linux-host
           path: dist/*.tar.gz
 
+  host-windows:
+    name: Windows host daemon
+    # Cross-compiled from an ordinary Linux runner via mingw-w64, rather than
+    # a windows-latest runner -- this job only needs to *build* the Windows
+    # binary; it can never exercise WGC capture or SendInput either way
+    # (a GitHub-hosted runner has no interactive desktop session, Windows or
+    # Linux), so real verification of the platform-specific code happens on
+    # a real Windows machine, not here. A Linux runner is faster and cheaper
+    # for a pure cross-compile.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-gnu
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 zip
+
+      # No `cargo test` here: a cross-compiled Windows .exe can't run on this
+      # Linux runner without Wine, which is more infrastructure than a build
+      # step justifies. The platform-neutral parts of platform::windows
+      # (keymap, doctor's classify_build) already run their real tests in
+      # the host-linux job above, since those modules compile unconditionally
+      # -- see their own doc comments for why. Clippy still runs here because
+      # it only needs to compile, not execute, the Windows-only code.
+      - name: Clippy (Windows target)
+        run: cargo clippy --target x86_64-pc-windows-gnu -p palmtopd --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release -p palmtopd --target x86_64-pc-windows-gnu
+
+      # BtbN's builds are static, GPL (libx264 included), and published under
+      # a stable "latest" release tag -- no version number to keep in sync
+      # with this workflow by hand. gyan.dev's builds (linked from the
+      # official ffmpeg.org downloads page) are the more commonly recommended
+      # source for a human installing by hand, but don't offer a URL this
+      # stable for automation.
+      - name: Fetch ffmpeg.exe
+        run: |
+          curl -fsSL -o /tmp/ffmpeg.zip \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          mkdir -p /tmp/ffmpeg-extracted
+          unzip -q /tmp/ffmpeg.zip -d /tmp/ffmpeg-extracted
+          find /tmp/ffmpeg-extracted -name ffmpeg.exe -exec cp {} /tmp/ffmpeg.exe \;
+          test -f /tmp/ffmpeg.exe
+
+      # Same flat, self-contained layout as the Linux tarball -- install.ps1
+      # detects this by palmtopd.exe sitting right beside it (see
+      # scripts/install.ps1's own layout-detection comment).
+      - name: Stage zip
+        run: |
+          version="${GITHUB_REF_NAME:-dev}"
+          staging="palmtopd-${version}-windows-x86_64"
+          mkdir -p "dist/$staging"
+          cp target/x86_64-pc-windows-gnu/release/palmtopd.exe "dist/$staging/"
+          cp /tmp/ffmpeg.exe "dist/$staging/"
+          cp scripts/install.ps1 scripts/uninstall.ps1 "dist/$staging/"
+          cp config/host.example.toml "dist/$staging/"
+          cp README.md "dist/$staging/" 2>/dev/null || true
+          ( cd dist && zip -qr "${staging}.zip" "$staging" )
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-host
+          path: dist/*.zip
+
   release:
     name: Publish release
-    needs: [android, host]
+    needs: [android, host-linux, host-windows]
     runs-on: ubuntu-latest
     # Only for real tags. A workflow_dispatch run builds and uploads
     # artifacts for inspection but must not create a GitHub Release.
@@ -193,6 +268,7 @@ jobs:
           files: |
             artifacts/android-apk/*.apk
             artifacts/linux-host/*.tar.gz
+            artifacts/windows-host/*.zip
           generate_release_notes: true
           body: |
             ## Install
@@ -219,5 +295,16 @@ jobs:
             ```
             ./show-pair-qr.sh
             ```
+
+            **Laptop (Windows)** — download the `.zip`, extract it, and run in
+            PowerShell:
+
+            ```
+            .\install.ps1
+            ```
+
+            Then pair by installing the app on your phone and, in the app,
+            Devices → Add by scanning QR — the code is written to
+            `%TEMP%\palmtop-pair.svg` on install.
 
             Full setup guide in the README.
