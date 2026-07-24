@@ -337,9 +337,16 @@ check **⚙ → 📊 Stats**, and prefer the phone's hotspot over shared Wi-Fi.
 journalctl --user -u palmtopd -f        # Linux
 ```
 
-On Windows, check Task Scheduler → Task Scheduler Library → **Palmtop** for
-its last run result, or run `palmtopd.exe` directly from a terminal to see
-its output live.
+```powershell
+Get-Content "$env:LOCALAPPDATA\Palmtop\palmtopd.log" -Wait   # Windows
+```
+
+That file is everything the daemon printed on its most recent start —
+including the pairing token/QR path and the reason for any startup failure
+that would otherwise be invisible, since Task Scheduler doesn't show a
+console window. You can also check Task Scheduler → Task Scheduler Library
+→ **Palmtop** for its last run result, or run `palmtopd.exe` directly from a
+terminal to see output live instead of through the log.
 
 ---
 

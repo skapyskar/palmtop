@@ -126,8 +126,25 @@ if (Test-Path $HostToml) {
 # logon without needing Administrator to register for the current user.
 $TaskName = 'Palmtop'
 $ExePath = Join-Path $InstallDir 'palmtopd.exe'
+$LogPath = Join-Path $InstallDir 'palmtopd.log'
+
+# Task Scheduler does not capture a launched process's stdout/stderr
+# anywhere by default -- it just runs, and whatever it prints (including,
+# critically, the exact pairing token/QR path and any startup error) is
+# lost. schtasks itself has no redirection option, so the Task points at a
+# tiny wrapper batch file that does the redirecting, rather than fighting
+# schtasks /tr's nested-quoting rules to inline a `cmd /c ... > log` command
+# directly -- a wrapper file keeps every layer of quoting to exactly one
+# level. `>` (not `>>`) so the log reflects only the current run, not an
+# ever-growing history across every logon since install.
+$WrapperPath = Join-Path $InstallDir 'run-palmtopd.cmd'
+@"
+@echo off
+"$ExePath" > "$LogPath" 2>&1
+"@ | Set-Content -Path $WrapperPath -Encoding ASCII
+
 Write-Info 'Registering the logon Scheduled Task...'
-& schtasks /create /tn $TaskName /tr "`"$ExePath`"" /sc onlogon /rl limited /f | Out-Null
+& schtasks /create /tn $TaskName /tr "`"$WrapperPath`"" /sc onlogon /rl limited /f | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Fail 'could not register the Scheduled Task -- see the schtasks error above'
 }
@@ -140,7 +157,7 @@ $Running = Get-Process -Name 'palmtopd' -ErrorAction SilentlyContinue
 if ($Running) {
     Write-Info 'palmtopd is running.'
 } else {
-    Write-Warn 'palmtopd does not appear to be running. Check Task Scheduler > Task Scheduler Library > Palmtop for its last run result.'
+    Write-Warn "palmtopd does not appear to be running. Check $LogPath for why, or Task Scheduler > Task Scheduler Library > Palmtop for its last run result."
 }
 
 # --- 4. check it can actually work ---------------------------------------------
@@ -180,5 +197,6 @@ Write-Info '     (open it in any image viewer or browser -- it embeds the pairin
 Write-Info '     token, so do not leave it open on a shared screen)'
 Write-Info ''
 Write-Info "  Check this machine can capture/encode:  & `"$ExePath`" --doctor"
+Write-Info "  See what the background daemon is doing: $LogPath"
 Write-Info "  Remove Palmtop completely:               .\uninstall.ps1"
 Write-Info ''
