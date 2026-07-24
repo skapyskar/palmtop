@@ -172,7 +172,7 @@ pub fn run(handle: ScreencastHandle, slot: Arc<FrameSlot>, stop: Arc<AtomicBool>
                 Ok(frame) => {
                     if let Err(e) = publish_frame(&frame, &handler_device, &handler_context, &handler_slot) {
                         eprintln!("[capture] FrameArrived #{n}: dropped a frame: {e:#}");
-                    } else if n <= 3 || n % 100 == 0 {
+                    } else if n <= 3 || n.is_multiple_of(100) {
                         // First few frames (proves capture is genuinely
                         // ongoing, not a one-shot) plus a periodic heartbeat
                         // afterward, without spamming a log line 30 times a
